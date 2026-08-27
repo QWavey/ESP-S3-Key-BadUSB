@@ -21,6 +21,7 @@
 #include "DuckyInterpreter.h"
 #include "WebServerManager.h"
 #include "BTManager.h"
+#include "UpdateManager.h"
 
 void setup() {
   Serial.begin(115200);
@@ -41,6 +42,7 @@ void setup() {
   autoConnectEnabled = preferences.getBool("autoconnect", false);
   saveOnConnectEnabled = preferences.getBool("save_creds", false);
   btDiscoveryEnabled = preferences.getBool("bt_discovery", false);
+  silentStartup = preferences.getBool("silent_boot", false);
 
 
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
@@ -136,6 +138,13 @@ void setup() {
   USB.begin();
   delay(1000);
 
+  // Silent startup: remove the HID keyboard from the bus right after enumeration
+  // so the host never sees a keyboard until a script/live-typing needs one.
+  if (silentStartup) {
+    hidDetach();
+    Serial.println("Silent startup: HID detached (stealth mode)");
+  }
+
   setupAP();
   bluetoothName = preferences.getString("bt_name", "ESP32-S3");
   setupBT();
@@ -191,6 +200,9 @@ void loop() {
   server.handleClient();
   handleLED();
 
+  // Apply a bundled .espkg update if one was uploaded (writes SD files, then OTAs)
+  processPendingUpdate();
+
   if (millis() - lastSDCheck >= SD_CHECK_INTERVAL) {
     lastSDCheck = millis();
     checkSDCard();
@@ -221,12 +233,19 @@ void loop() {
     }
   }
 
-  if (bootModeEnabled && WiFi.softAPgetStationNum() > 0 && !scriptRunning) {
+  // Run the boot script ONCE per connection session, not on every loop.
+  // Without this guard it re-fires continuously while any client stays
+  // connected (scriptRunning clears the moment the script ends).
+  static bool bootScriptHasRun = false;
+  int bootStations = WiFi.softAPgetStationNum();
+  if (bootStations == 0) bootScriptHasRun = false;   // rearm when everyone leaves
+  if (bootModeEnabled && bootStations > 0 && !scriptRunning && !bootScriptHasRun) {
+    bootScriptHasRun = true;
     Serial.println("Client connected - executing boot script");
     logCommand("BOOT_SCRIPT", "Executing boot script on client connection");
     executeScript(bootScript);
   }
-  
+
   // Background processing for Rower and Automation
   processRower();
   processAutomation();

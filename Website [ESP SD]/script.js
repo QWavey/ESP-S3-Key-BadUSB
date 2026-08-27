@@ -238,25 +238,6 @@ function initResizableEditor() {
 }
 
 // =============================================
-// Tab Navigation (Fixes mobile switching bug)
-// =============================================
-function openTab(evt, tabName) {
-    const tabs = document.querySelectorAll('.tabcontent');
-    tabs.forEach(t => t.style.display = 'none');
-    const links = document.querySelectorAll('.tablinks');
-    links.forEach(l => l.classList.remove('active'));
-    const target = document.getElementById('tab-' + tabName);
-    if (target) target.style.display = 'block';
-    if (evt && evt.currentTarget) evt.currentTarget.classList.add('active');
-    // Lazy-load tab data on switch
-    if (tabName === 'Scripts') setTimeout(refreshFiles, 50);
-    if (tabName === 'File_Manager') setTimeout(refreshFileBrowser, 50);
-    if (tabName === 'Boot') setTimeout(refreshBootScripts, 50);
-    if (tabName === 'Statistics') setTimeout(updateStats, 50);
-    if (tabName === 'Settings') setTimeout(initSettingsTab, 50);
-}
-
-// =============================================
 // System Status Polling
 // =============================================
 function pollSystemStatus() {
@@ -435,25 +416,41 @@ function pollSystemStatus() {
     });
 }
 
+// =============================================
+// Tab Navigation (single source of truth)
+// =============================================
 function openTab(evt, tabName) {
     const tablinks = document.getElementsByClassName('tablinks');
     for (let i = 0; i < tablinks.length; i++) tablinks[i].classList.remove('active');
-    
-    if (evt) evt.currentTarget.classList.add('active');
-    else Array.from(tablinks).forEach(btn => { if (btn.textContent.includes(tabName)) btn.classList.add('active'); });
+
+    if (evt && evt.currentTarget) evt.currentTarget.classList.add('active');
+    else Array.from(tablinks).forEach(btn => { if (btn.textContent.trim() === displayNameForTab(tabName)) btn.classList.add('active'); });
 
     const tabcontents = document.getElementsByClassName('tabcontent');
     for (let i = 0; i < tabcontents.length; i++) tabcontents[i].style.display = 'none';
-    
+
     const target = document.getElementById('tab-' + tabName);
     if (target) target.style.display = 'block';
 
-    if (tabName === 'Scripts') refreshFiles();
-    if (tabName === 'Boot') refreshBootScripts();
-    if (tabName === 'Statistics') updateStats();
-    if (tabName === 'File_Manager') refreshFileBrowser();
-    if (tabName === 'Design') refreshDesigns();
-    if (tabName === 'Settings') initSettingsTab();
+    // Lazy-load per-tab data. Wrapped so a failing refresh can never
+    // leave the UI wedged on the current tab (the switch already happened above).
+    try {
+        if (tabName === 'Scripts') refreshFiles();
+        else if (tabName === 'Boot') refreshBootScripts();
+        else if (tabName === 'Statistics') updateStats();
+        else if (tabName === 'File_Manager') refreshFileBrowser();
+        else if (tabName === 'Design') refreshDesigns();
+        else if (tabName === 'Settings') initSettingsTab();
+        else if (tabName === 'Live') { const li = document.getElementById('liveInput'); if (li) setTimeout(() => li.focus(), 50); }
+    } catch (e) {
+        console.error('Tab data load failed for', tabName, e);
+    }
+}
+
+// Maps an internal tab id to its visible button label (they differ for a few tabs).
+function displayNameForTab(tabName) {
+    const map = { 'Script': 'Coding', 'File_Manager': 'Explorer', 'Statistics': 'Stats' };
+    return map[tabName] || tabName;
 }
 
 function applyHighlighting(line) {
@@ -1173,8 +1170,8 @@ function refreshBootScripts() {
                 item.innerHTML = `<label class="custom-checkbox"><input type="checkbox" name="bootScript" value="${f}" ${checked ? 'checked' : ''}> ${f}</label>`;
                 list.appendChild(item);
             });
-        });
-    });
+        }).catch(e => console.error('boot stats load failed', e));
+    }).catch(e => console.error('boot scripts load failed', e));
 }
 
 function saveBootScripts() {
@@ -1377,7 +1374,9 @@ function initSettingsTab() {
         document.getElementById('btToggle').checked = (data.btToggleEnabled === true);
         const btDisc = document.getElementById('btDiscoveryToggle');
         if (btDisc) btDisc.checked = (data.btDiscoveryEnabled === true);
-        
+        const silent = document.getElementById('silentToggle');
+        if (silent) silent.checked = (data.silentStartup === true);
+
         // AP Settings
         document.getElementById('wifiSSID').value = data.wifiSSID || '';
         document.getElementById('wifiPassword').value = data.wifiPassword || '';
@@ -1401,6 +1400,11 @@ function toggleLogging() { fetch('/api/toggle-logging', {method:'POST', body:JSO
 function toggleWiFi() { fetch('/api/toggle-wifi', {method:'POST', body:JSON.stringify({enabled:document.getElementById('wifiToggle').checked})}); }
 function toggleBluetooth() { fetch('/api/toggle-bluetooth', {method:'POST', body:JSON.stringify({enabled:document.getElementById('btToggle').checked})}); }
 function toggleBluetoothDiscovery() { fetch('/api/toggle-bt-discovery', {method:'POST', body:JSON.stringify({enabled:document.getElementById('btDiscoveryToggle').checked})}); }
+function toggleSilentStartup() {
+    const on = document.getElementById('silentToggle').checked;
+    fetch('/api/set-silent', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:on})})
+        .then(r=>r.text()).then(msg=>{ if (on) alert('Silent Startup enabled.\nThe HID keyboard will no longer appear at boot — it attaches only while typing, then detaches.'); });
+}
 function toggleAutoConnect() { fetch('/api/toggle-autoconnect', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:document.getElementById('autoConnectToggle').checked})}); }
 function toggleSaveOnConnect() { fetch('/api/toggle-save-on-connect', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:document.getElementById('saveCredToggle').checked})}); }
 
@@ -2010,3 +2014,156 @@ function initAllCustomScrollbars() {
 }
 
 
+
+// =============================================
+// Live Keyboard (types to the host in real time)
+// =============================================
+let liveTypingOn = false;
+
+function toggleLiveTyping() {
+    const cb = document.getElementById('liveEnabled');
+    liveTypingOn = cb ? cb.checked : false;
+    const s = document.getElementById('liveStatus');
+    if (s) {
+        s.textContent = liveTypingOn ? '● LIVE — keys go to host' : 'Live typing off';
+        s.style.color = liveTypingOn ? 'var(--primary)' : 'var(--text-muted)';
+    }
+    if (liveTypingOn) {
+        const li = document.getElementById('liveInput');
+        if (li) li.focus();
+    } else {
+        // ask the device to detach the keyboard again if Silent Startup is on
+        liveSend({ release: true });
+    }
+}
+
+function liveSend(payload) {
+    return fetch('/api/live-type', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: true
+    }).catch(e => console.error('live-type failed', e));
+}
+
+function liveSendSpecial(name) { liveSend({ special: name }); }
+
+function sendLiveText() {
+    const li = document.getElementById('liveInput');
+    if (li && li.value.length) liveSend({ text: li.value });
+}
+
+const LIVE_SPECIAL_KEYS = {
+    'Enter': 'ENTER', 'Backspace': 'BACKSPACE', 'Tab': 'TAB', 'Escape': 'ESC',
+    'ArrowUp': 'ARROW_UP', 'ArrowDown': 'ARROW_DOWN',
+    'ArrowLeft': 'ARROW_LEFT', 'ArrowRight': 'ARROW_RIGHT',
+    'Delete': 'DELETE', 'Home': 'HOME', 'End': 'END'
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    const li = document.getElementById('liveInput');
+    if (!li) return;
+    li.addEventListener('keydown', (e) => {
+        if (!liveTypingOn) return;
+        // Ctrl/Alt/Gui combos -> send as a key combination
+        if ((e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1) {
+            e.preventDefault();
+            const mods = [];
+            if (e.ctrlKey) mods.push('CTRL');
+            if (e.altKey) mods.push('ALT');
+            if (e.metaKey) mods.push('GUI');
+            if (e.shiftKey) mods.push('SHIFT');
+            liveSend({ combo: mods.join(' ') + ' ' + e.key });
+            return;
+        }
+        if (LIVE_SPECIAL_KEYS[e.key]) {
+            if (e.key === 'Tab') e.preventDefault(); // keep focus in the box
+            liveSendSpecial(LIVE_SPECIAL_KEYS[e.key]);
+            return;
+        }
+        if (e.key.length === 1) {
+            liveSend({ k: e.key }); // printable char; also appears in the box as feedback
+        }
+    });
+});
+
+// =============================================
+// Bundled firmware/website update (.espkg)
+// =============================================
+function uploadUpdatePackage() {
+    const fileInput = document.getElementById('espkgFile');
+    const file = fileInput && fileInput.files[0];
+    if (!file) { alert('Choose a .espkg file first.'); return; }
+    if (!file.name.endsWith('.espkg')) {
+        if (!confirm('That file is not a .espkg. Upload anyway?')) return;
+    }
+
+    const bar = document.getElementById('updateProgressBar');
+    const fill = document.getElementById('updateProgressFill');
+    const statusLine = document.getElementById('updateStatusLine');
+    const btn = document.getElementById('updateApplyBtn');
+    bar.style.display = 'block';
+    fill.style.width = '0%';
+    btn.disabled = true;
+    statusLine.textContent = 'Uploading package...';
+
+    const form = new FormData();
+    form.append('package', file, file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/update-package');
+    xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            fill.style.width = pct + '%';
+            statusLine.textContent = 'Uploading... ' + pct + '%';
+        }
+    };
+    xhr.onload = () => {
+        if (xhr.status === 200) {
+            statusLine.textContent = 'Upload complete — applying...';
+            pollUpdateStatus();
+        } else {
+            statusLine.textContent = 'Upload failed: ' + xhr.status + ' ' + xhr.responseText;
+            btn.disabled = false;
+        }
+    };
+    xhr.onerror = () => { statusLine.textContent = 'Upload error (connection lost).'; btn.disabled = false; };
+    xhr.send(form);
+}
+
+function pollUpdateStatus() {
+    const fill = document.getElementById('updateProgressFill');
+    const statusLine = document.getElementById('updateStatusLine');
+    const btn = document.getElementById('updateApplyBtn');
+    let misses = 0;
+    const iv = setInterval(() => {
+        fetch('/api/update-status', { cache: 'no-store' }).then(r => r.json()).then(s => {
+            misses = 0;
+            fill.style.width = (s.progress || 0) + '%';
+            statusLine.textContent = s.status || 'Applying...';
+            const done = !s.applying && (s.progress >= 100 || /done|reboot|website updated/i.test(s.status || ''));
+            const err = !s.applying && /error/i.test(s.status || '');
+            if (err) {
+                clearInterval(iv);
+                btn.disabled = false;
+            } else if (done) {
+                clearInterval(iv);
+                if (/reboot/i.test(s.status || '')) {
+                    statusLine.textContent = 'Firmware flashed — device rebooting. Reconnect in ~15s.';
+                } else {
+                    statusLine.textContent = (s.status || 'Done') + ' — reloading UI...';
+                    setTimeout(() => location.reload(true), 1500);
+                }
+                btn.disabled = false;
+            }
+        }).catch(() => {
+            // during the OTA reboot the device drops off — treat repeated misses as a reboot
+            misses++;
+            if (misses > 4) {
+                clearInterval(iv);
+                statusLine.textContent = 'Device rebooting (firmware applied). Reconnect in ~15s.';
+                btn.disabled = false;
+            }
+        });
+    }, 1000);
+}

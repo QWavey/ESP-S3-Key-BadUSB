@@ -1,5 +1,42 @@
 #include "USBManager.h"
 #include "DuckyInterpreter.h"
+#include "esp32-hal-tinyusb.h"   // pulls in tusb.h -> tud_connect/tud_disconnect/tud_mounted
+
+// ---- Stealth HID (silent startup) ------------------------------------------
+// The ESP32-S3 USB-Serial/JTAG peripheral is separate hardware, so detaching
+// the TinyUSB HID device does NOT affect flashing/serial. tud_disconnect()
+// electrically removes the keyboard from the bus (host sees an unplug);
+// tud_connect() re-presents it.
+
+void hidDetach() {
+  tud_disconnect();
+  hidConnected = false;
+  delay(50);
+}
+
+bool hidAttach() {
+  tud_connect();
+  hidConnected = true;
+  unsigned long start = millis();
+  while (!tud_mounted() && (millis() - start) < 2000) {
+    delay(10);
+  }
+  delay(150);                 // let the host bind the HID driver before typing
+  return tud_mounted();
+}
+
+void ensureHidReady() {
+  if (!hidConnected || !tud_mounted()) {
+    hidAttach();
+  }
+}
+
+void hidReleaseIfSilent() {
+  if (silentStartup) {
+    delay(80);                 // flush any in-flight report before unplugging
+    hidDetach();
+  }
+}
 
 KeyCode parseKeyCode(String keyCodeStr) {
   KeyCode result = {0, 0};

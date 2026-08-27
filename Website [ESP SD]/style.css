@@ -22,6 +22,11 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+html, body {
+    overflow-x: hidden;      /* never allow sideways scroll / zoom-out on mobile */
+    max-width: 100%;
+}
+
 body {
     font-family: 'Inter', sans-serif;
     background-color: var(--bg-dark);
@@ -35,9 +40,10 @@ body {
 }
 
 .container {
-    width: 1000px; /* Fixed width base */
+    width: 100%;            /* Fluid so it never exceeds the viewport (mobile) */
+    max-width: 1000px;      /* but capped on large screens */
     height: auto;
-    min-width: 600px;
+    min-width: 0;
     min-height: 400px;
     margin: 0 auto;
     background: var(--bg-card);
@@ -202,6 +208,26 @@ textarea {
     letter-spacing: 0px !important;
     -webkit-text-fill-color: transparent; /* Force transparency for Chrome */
 }
+
+/* Standalone textareas (Live input, Boot preview) are normal in-flow boxes,
+   not part of the transparent editor-overlay used by #scriptArea. */
+#liveInput, #bootScriptPreview {
+    position: relative;
+    top: auto;
+    left: auto;
+    height: auto;
+    width: 100%;
+    background: var(--bg-input);
+    color: var(--text-main);
+    -webkit-text-fill-color: var(--text-main);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    overflow-y: auto;
+    display: block;
+}
+#liveInput { font-size: 15px; line-height: 1.5; }
 
 #scriptArea::-webkit-scrollbar, .file-list::-webkit-scrollbar, .history-list::-webkit-scrollbar, .file-browser::-webkit-scrollbar, .editor-highlights::-webkit-scrollbar {
     display: none; /* Hide native scrollbars */
@@ -1121,10 +1147,23 @@ input:checked + .slider:before { transform: translateX(22px); }
     text-align: right;
 }
 
-@media (max-width: 600px) {
-    .container { padding: 20px; }
-    .tablinks { min-width: 80px; font-size: 12px; }
+@media (max-width: 768px) {
+    body { padding: 10px; }
+    .container { padding: 18px; border-radius: 14px; }
     .grid-2 { grid-template-columns: 1fr; }
+    .tab { gap: 6px; padding: 6px; }
+    .tablinks { flex: 1 1 28%; min-width: 0; font-size: 13px; padding: 9px 6px; }
+    h1 { font-size: 22px; margin-bottom: 18px; }
+}
+
+@media (max-width: 600px) {
+    body { padding: 6px; }
+    .container { padding: 14px; }
+    .tablinks { flex: 1 1 30%; font-size: 12px; padding: 8px 4px; }
+    .control-panel { gap: 6px; }
+    .control-btn { flex: 1 1 45%; }
+    /* keep wide/monospace content scrollable inside its box, not the page */
+    .editor-wrapper, textarea, .file-list, .file-browser { max-width: 100%; }
 }
 
 /* Connection Overlay Styling */

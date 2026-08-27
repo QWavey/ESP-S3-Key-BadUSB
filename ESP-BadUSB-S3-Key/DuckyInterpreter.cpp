@@ -72,6 +72,8 @@ void executeScript(const String& script) {
   scriptStartTime = millis();
   setLEDMode(1);
 
+  ensureHidReady();   // attach the keyboard now if silent-startup detached it
+
   if (loggingEnabled) {
     openLogFile();
     logCommand("SCRIPT_START", "Script execution started");
@@ -519,6 +521,8 @@ void executeScript(const String& script) {
   } else {
     showCompletionBlink();
   }
+
+  hidReleaseIfSilent();   // stealth: detach the keyboard again after the script
 }
 
 void executeCommand(String line) {
@@ -677,7 +681,11 @@ void executeCommand(String line) {
   }
 
   if (line.startsWith("LED_")) {
-    if (line == "LED_R") setLED(255, 0, 0);
+    // NOTE: the ESP32-S3-Dongle/Key has ONE blue status LED. Every colour
+    // command below simply lights that blue LED; only ON / OFF / BLINK differ
+    // in behaviour. LED_ON is the preferred, board-accurate command.
+    if (line == "LED_ON") setLED(0, 0, 255);
+    else if (line == "LED_R") setLED(255, 0, 0);
     else if (line == "LED_G") setLED(0, 255, 0);
     else if (line == "LED_B") setLED(0, 0, 255);
     else if (line == "LED_Y") setLED(255, 255, 0);
@@ -734,6 +742,10 @@ void executeCommand(String line) {
     blinkingEnabled = false;
     return;
   }
+
+  // Stealth HID control (works together with Silent Startup)
+  if (line == "HID_DETACH") { hidDetach(); return; }
+  if (line == "HID_ATTACH") { hidAttach(); return; }
 
   if (line.startsWith("HOLD ")) {
     String params = line.substring(5);

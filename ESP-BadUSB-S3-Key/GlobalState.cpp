@@ -12,6 +12,13 @@ String ap_password = DEFAULT_AP_PASSWORD;
 int wifiScanTime = WIFI_SCAN_TIMEOUT;
 bool autoConnectEnabled = false;
 bool saveOnConnectEnabled = false;
+bool silentStartup = false;
+bool hidConnected = true;
+
+bool updatePackageReady = false;
+int  updateProgress = 0;
+String updateStatus = "";
+bool updateApplying = false;
 int buttonPin = 0;
 bool buttonState = false;
 

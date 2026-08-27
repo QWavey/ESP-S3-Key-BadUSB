@@ -11,4 +11,10 @@ void handleKeyInput(String line);
 void pressKeyOnly(String key);
 void releaseAllKeys();
 
+// Stealth HID (silent startup): present/remove the USB keyboard on demand.
+void hidDetach();            // pull the device off the bus (host sees an unplug)
+bool hidAttach();            // re-present and wait until the host enumerates it
+void ensureHidReady();       // attach + settle only if currently detached
+void hidReleaseIfSilent();   // detach again after typing, when silentStartup is on
+
 #endif // USB_MANAGER_H

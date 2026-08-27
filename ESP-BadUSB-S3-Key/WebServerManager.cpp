@@ -2,6 +2,8 @@
 #include "WebServerHandlers.h"
 #include "FSManager.h"
 #include "DuckyInterpreter.h"
+#include "USBManager.h"
+#include "UpdateManager.h"
 #include "LogManager.h"
 #include "LEDManager.h"
 #include "WiFiManager.h"
@@ -22,6 +24,12 @@ void setupWebServer() {
   server.on("/api/upload", HTTP_POST, []() {
     server.send(200, "text/plain", "Upload complete: " + uploadFilename);
   }, handleFileUpload);
+
+  // Bundled .espkg update: upload streams to SD, POST finalizer arms the apply,
+  // status endpoint reports progress while it writes SD files then OTAs firmware.
+  server.on("/api/update-package", HTTP_POST, handleUpdatePackagePost, handleUpdatePackageUpload);
+  server.on("/api/update-status", HTTP_GET, handleUpdateStatus);
+
   server.on("/api/download", handleFileDownload);
   server.on("/api/list-files", handleListFiles);
   server.on("/api/delete-file", HTTP_DELETE, handleDeleteFile);
@@ -73,6 +81,7 @@ void setupWebServer() {
 
 
   server.on("/execute", HTTP_POST, []() {
+    if (updateApplying) { server.send(409, "text/plain; charset=utf-8", "Busy: firmware update in progress"); return; }
     String script = server.arg("plain");
     executeScript(script);
     server.send(200, "text/plain; charset=utf-8", "OK");
@@ -207,6 +216,50 @@ void setupWebServer() {
       preferences.putBool("bt_discovery", btDiscoveryEnabled);
     }
     server.send(200, "application/json", "{\"enabled\":" + String(btDiscoveryEnabled ? "true" : "false") + "}");
+  });
+
+  // Silent Startup (stealth HID): persist + apply immediately (no reboot needed)
+  server.on("/api/set-silent", HTTP_POST, []() {
+    String body = server.arg("plain");
+    DynamicJsonDocument doc(256);
+    if (!deserializeJson(doc, body)) {
+      silentStartup = doc["enabled"];
+      preferences.putBool("silent_boot", silentStartup);
+      if (silentStartup) hidDetach();   // remove keyboard from the bus now
+      else hidAttach();                 // present it again now
+    }
+    server.send(200, "application/json", "{\"enabled\":" + String(silentStartup ? "true" : "false") + "}");
+  });
+
+  // Live keyboard: type a character / string / special key straight to the host
+  server.on("/api/live-type", HTTP_POST, []() {
+    if (scriptRunning) { server.send(409, "text/plain; charset=utf-8", "Busy: a script is running"); return; }
+    if (updateApplying) { server.send(409, "text/plain; charset=utf-8", "Busy: firmware update in progress"); return; }
+    String body = server.arg("plain");
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, body)) { server.send(400, "text/plain", "Invalid JSON"); return; }
+
+    // Turning Live typing off asks us to detach again (when silent-startup is on)
+    if (!doc["release"].isNull()) { hidReleaseIfSilent(); server.send(200, "text/plain", "released"); return; }
+
+    ensureHidReady();          // attach once; cheap no-op if already mounted
+    stopRequested = false;
+
+    if (!doc["text"].isNull()) {
+      fastTypeString(doc["text"].as<String>());
+    } else if (!doc["k"].isNull()) {
+      fastTypeString(doc["k"].as<String>());
+    } else if (!doc["special"].isNull()) {
+      String s = doc["special"].as<String>();
+      if (s == "ARROW_UP") s = "UP";
+      else if (s == "ARROW_DOWN") s = "DOWN";
+      else if (s == "ARROW_LEFT") s = "LEFT";
+      else if (s == "ARROW_RIGHT") s = "RIGHT";
+      fastPressKey(s);
+    } else if (!doc["combo"].isNull()) {
+      handleKeyInput(doc["combo"].as<String>());
+    }
+    server.send(200, "text/plain", "ok");
   });
 
 
@@ -490,6 +543,10 @@ void setupWebServer() {
     doc["btDiscoveryEnabled"] = btDiscoveryEnabled;
     doc["autoConnectEnabled"] = autoConnectEnabled;
     doc["saveOnConnectEnabled"] = saveOnConnectEnabled;
+    doc["silentStartup"] = silentStartup;
+    // Currently-selected boot scripts, so the Boot tab can show them checked
+    JsonArray bootArr = doc.createNestedArray("bootScripts");
+    for (auto& f : currentBootScriptFiles) bootArr.add(f);
     // Delay progress (0-100)
     if (currentDelayTotal > 0) {
       unsigned long elapsed = millis() - currentDelayStart;

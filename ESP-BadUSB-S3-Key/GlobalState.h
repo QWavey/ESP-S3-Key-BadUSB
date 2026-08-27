@@ -31,6 +31,14 @@ extern String ap_password;
 extern int wifiScanTime;
 extern bool autoConnectEnabled;
 extern bool saveOnConnectEnabled;
+extern bool silentStartup;   // stealth HID: don't present keyboard at boot; attach only while typing
+extern bool hidConnected;    // tracks current USB HID attach state
+
+// Bundled .espkg firmware/website update
+extern bool updatePackageReady;   // upload finished, apply on next loop
+extern int  updateProgress;       // 0-100 across the whole apply
+extern String updateStatus;       // human-readable status line
+extern bool updateApplying;       // true while applyEspkg() runs
 extern int buttonPin;
 extern bool buttonState;
 

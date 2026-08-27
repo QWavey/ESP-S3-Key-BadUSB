@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <link rel="stylesheet" href="style.css?v=2.5">
+    <link rel="stylesheet" href="style.css?v=2.6">
 </head>
 <body>
     <div class="container">
@@ -15,6 +15,7 @@
         
         <nav class="tab">
             <button class="tablinks active" onclick="openTab(event, 'Script')">Coding</button>
+            <button class="tablinks" onclick="openTab(event, 'Live')">Live</button>
             <button class="tablinks" onclick="openTab(event, 'Scripts')">Scripts</button>
             <button class="tablinks" onclick="openTab(event, 'File_Manager')">Explorer</button>
             <button class="tablinks" onclick="openTab(event, 'Design')">Design</button>
@@ -76,6 +77,33 @@
                         <button onclick="refreshTasks()" style="padding: 5px 12px; font-size: 11px;">Refresh</button>
                     </div>
                     <div id="taskList" class="file-list" style="margin-top:10px"></div>
+                </div>
+            </section>
+
+            <!-- Live Typing Tab -->
+            <section id="tab-Live" class="tabcontent">
+                <div class="flex-row" style="justify-content: space-between; align-items: center;">
+                    <h3>Live Keyboard</h3>
+                    <div id="liveStatus" style="font-size: 12px; color: var(--text-muted);">Live typing off</div>
+                </div>
+                <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+                    With <b>Live typing</b> enabled, every key you press below is sent to the target computer
+                    instantly over HID &mdash; like a wireless keyboard. Enter, Backspace, Tab, Esc and arrows are forwarded too.
+                </p>
+
+                <div class="flex-row" style="justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <span>Live typing</span>
+                    <label class="switch"><input type="checkbox" id="liveEnabled" onchange="toggleLiveTyping()"><span class="slider round"></span></label>
+                </div>
+
+                <textarea id="liveInput" spellcheck="false" placeholder="Enable Live typing, then type here — keys are sent to the host as you press them..." style="height: 220px; width: 100%;"></textarea>
+
+                <div class="control-panel flex-row" style="margin-top: 15px; flex-wrap: wrap;">
+                    <button class="control-btn" onclick="sendLiveText()">Send All Text</button>
+                    <button class="control-btn" onclick="liveSendSpecial('ENTER')">Enter</button>
+                    <button class="control-btn" onclick="liveSendSpecial('BACKSPACE')">Backspace</button>
+                    <button class="control-btn" onclick="liveSendSpecial('TAB')">Tab</button>
+                    <button class="control-btn" onclick="document.getElementById('liveInput').value=''">Clear</button>
                 </div>
             </section>
 
@@ -198,9 +226,13 @@
                             <span>Bluetooth</span>
                             <label class="switch"><input type="checkbox" id="btToggle" onchange="toggleBluetooth()"><span class="slider"></span></label>
                         </div>
-                        <div class="flex-row" style="justify-content: space-between;">
+                        <div class="flex-row" style="justify-content: space-between; margin-bottom: 10px;">
                             <span>Bluetooth Discovery</span>
                             <label class="switch"><input type="checkbox" id="btDiscoveryToggle" onchange="toggleBluetoothDiscovery()"><span class="slider"></span></label>
+                        </div>
+                        <div class="flex-row" style="justify-content: space-between; align-items: center;">
+                            <span title="Do not present the USB keyboard at boot. HID only attaches while typing, then detaches again (stealth).">Silent Startup (stealth HID)</span>
+                            <label class="switch"><input type="checkbox" id="silentToggle" onchange="toggleSilentStartup()"><span class="slider"></span></label>
                         </div>
                     </div>
                 </div>
@@ -277,6 +309,22 @@
                         <div id="savedNetworksList" class="file-list" style="margin-bottom: 10px; min-height: 40px; font-size: 12px;">Loading...</div>
                         <button onclick="loadSavedNetworks()" style="width: 100%; font-size: 12px; padding: 6px;">Refresh List</button>
                     </div>
+                </div>
+
+                <div class="setting-group">
+                    <h4>Firmware Update (.espkg package)</h4>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px;">
+                        Upload a bundled <code>.espkg</code> package to update the web UI and the
+                        firmware in one step. The website files are written to the SD card first,
+                        then the ESP32 firmware is flashed and the device reboots. Do not unplug
+                        during the update.
+                    </p>
+                    <input type="file" id="espkgFile" accept=".espkg" style="width: 100%; margin-bottom: 10px;">
+                    <div class="progress-bar" id="updateProgressBar" style="display:none; margin-bottom: 10px;">
+                        <div class="progress-fill" id="updateProgressFill" style="width:0%"></div>
+                    </div>
+                    <div id="updateStatusLine" style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px;">Idle</div>
+                    <button id="updateApplyBtn" onclick="uploadUpdatePackage()" style="width: 100%;">Upload &amp; Apply Update</button>
                 </div>
 
                 <div class="setting-group danger">
@@ -391,13 +439,22 @@ ENDIF</div>
                     <div class="setting-group">
                         <h4 onclick="toggleHelp('sys-help')" style="cursor:pointer">System & Hardware ▼</h4>
                         <div id="sys-help" class="help-grid" style="display:none;">
-                            <div class="help-item" onclick="toggleExample(this)">
-                                <code>LED_R</code><span>Set LED Red</span>
-                                <div class="help-example">LED_R</div>
+                            <div class="help-item" style="grid-column: 1 / -1; cursor: default;">
+                                <span style="color: var(--text-muted); font-size: 12px;">This board has a single <b>blue</b> status LED — it can only be ON, OFF, or BLINK (colour commands still work but always show blue).</span>
                             </div>
                             <div class="help-item" onclick="toggleExample(this)">
-                                <code>BLINK_LED_G</code><span>Blink Green</span>
-                                <div class="help-example">BLINK_LED_G</div>
+                                <code>LED_ON</code><span>Turn the blue LED on</span>
+                                <div class="help-example">LED_ON</div>
+                            </div>
+                            <div class="help-item" onclick="toggleExample(this)">
+                                <code>LED_OFF</code><span>Turn the LED off</span>
+                                <div class="help-example">LED_OFF</div>
+                            </div>
+                            <div class="help-item" onclick="toggleExample(this)">
+                                <code>LED_BLINK</code><span>Blink the LED</span>
+                                <div class="help-example">LED_BLINK
+DELAY 1000
+LED_OFF</div>
                             </div>
                             <div class="help-item" onclick="toggleExample(this)">
                                 <code>REBOOT</code><span>Restart Device</span>
@@ -464,6 +521,6 @@ BLINK_STOP</div>
         </div>
     </div>
 
-    <script src="script.js?v=2.5"></script>
+    <script src="script.js?v=2.6"></script>
 </body>
 </html>
