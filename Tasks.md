@@ -14,8 +14,8 @@
 12. [x] Python builder script `build_espkg.py`
 13. [x] WebUI: Settings "Firmware Update" (file picker + upload progress bar + apply-status polling)
 14. [x] Bug-hunt rounds 7-10: update/upload path, OTA safety, streaming, remaining fragility
-15. [ ] Final compile-verify (NO flash), commit, push to private esp32-s3-key repo
-16. [ ] Write SESSION_SUMMARY.md, then shutdown
+15. [x] Final compile-verify (NO flash), commit, push to private esp32-s3-key repo
+16. [x] Write SESSION_SUMMARY.md, then shutdown
 
 ---
 
