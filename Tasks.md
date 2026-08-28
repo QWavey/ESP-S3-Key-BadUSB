@@ -30,3 +30,12 @@ For 14. Bug-hunt 4 more rounds focused on the update/upload path (partial upload
 For 15. Compile-verify the final firmware (do NOT flash). Commit everything and push to the PRIVATE esp32-s3-key repo. Done when: compile exit 0 and push succeeds.
 
 For 16. Write SESSION_SUMMARY.md (what was done, what remains to flash/test), then run shutdown-when-done as the very last action. Done when: summary saved and shutdown scheduled.
+
+---
+
+## Follow-up session (user testing feedback)
+
+17. [x] Fix: Live typing not sending per-keystroke — was gated behind an off-by-default toggle. Now armed on load (toggle defaults ON, `● LIVE` status), verified in-browser: each keystroke + Enter + Ctrl-combo POSTs to /api/live-type.
+18. [x] Fix: Silent Startup still made the Windows connect sound — USB was enumerating at boot then detaching. Now `USB.begin()` is DEFERRED entirely in silent mode (no boot enumeration, no sound); USB starts on first script/live-type via `ensureHidReady()`.
+19. [x] Bug-hunt (10 fresh rounds) on the new HID/live code: fixed 2 Major (set-silent & HID_ATTACH called tud_connect on uninitialized USB after a silent boot) + 3 Minor (IME/dead-key guard, Send-All-Text >2KB, live-off release). 5 rounds clean.
+20. [x] Re-compile + re-flash with all fixes; commit + push.

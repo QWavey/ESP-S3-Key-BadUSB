@@ -135,14 +135,18 @@ void setup() {
   USB.productName(currentUSBConfig.prod.c_str());
 
   keyboard.begin();
-  USB.begin();
-  delay(1000);
-
-  // Silent startup: remove the HID keyboard from the bus right after enumeration
-  // so the host never sees a keyboard until a script/live-typing needs one.
   if (silentStartup) {
-    hidDetach();
-    Serial.println("Silent startup: HID detached (stealth mode)");
+    // Stealth: do NOT start USB at boot. The D+ pull-up is never asserted, so
+    // the host never enumerates a keyboard and Windows plays no connect sound.
+    // USB.begin() is deferred until the first script / live-typing needs HID.
+    usbStarted = false;
+    hidConnected = false;
+    Serial.println("Silent startup: USB HID deferred (no boot enumeration)");
+  } else {
+    USB.begin();
+    usbStarted = true;
+    hidConnected = true;
+    delay(1000);
   }
 
   setupAP();

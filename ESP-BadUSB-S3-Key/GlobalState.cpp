@@ -14,6 +14,7 @@ bool autoConnectEnabled = false;
 bool saveOnConnectEnabled = false;
 bool silentStartup = false;
 bool hidConnected = true;
+bool usbStarted = false;
 
 bool updatePackageReady = false;
 int  updateProgress = 0;

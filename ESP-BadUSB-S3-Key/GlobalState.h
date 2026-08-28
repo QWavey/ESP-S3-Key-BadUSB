@@ -33,6 +33,7 @@ extern bool autoConnectEnabled;
 extern bool saveOnConnectEnabled;
 extern bool silentStartup;   // stealth HID: don't present keyboard at boot; attach only while typing
 extern bool hidConnected;    // tracks current USB HID attach state
+extern bool usbStarted;      // whether USB.begin() has been called yet (deferred in silent mode)
 
 // Bundled .espkg firmware/website update
 extern bool updatePackageReady;   // upload finished, apply on next loop

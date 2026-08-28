@@ -2063,8 +2063,11 @@ const LIVE_SPECIAL_KEYS = {
 document.addEventListener('DOMContentLoaded', () => {
     const li = document.getElementById('liveInput');
     if (!li) return;
+    // Arm live typing from the (default-on) toggle so the box is live immediately.
+    toggleLiveTyping();
     li.addEventListener('keydown', (e) => {
         if (!liveTypingOn) return;
+        if (e.isComposing || e.keyCode === 229 || e.key === 'Dead' || e.key === 'Process') return; // IME/dead keys
         // Ctrl/Alt/Gui combos -> send as a key combination
         if ((e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1) {
             e.preventDefault();

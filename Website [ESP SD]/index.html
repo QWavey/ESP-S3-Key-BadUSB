@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <link rel="stylesheet" href="style.css?v=2.6">
+    <link rel="stylesheet" href="style.css?v=2.7">
 </head>
 <body>
     <div class="container">
@@ -84,7 +84,7 @@
             <section id="tab-Live" class="tabcontent">
                 <div class="flex-row" style="justify-content: space-between; align-items: center;">
                     <h3>Live Keyboard</h3>
-                    <div id="liveStatus" style="font-size: 12px; color: var(--text-muted);">Live typing off</div>
+                    <div id="liveStatus" style="font-size: 12px; color: var(--primary);">● LIVE</div>
                 </div>
                 <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
                     With <b>Live typing</b> enabled, every key you press below is sent to the target computer
@@ -92,11 +92,11 @@
                 </p>
 
                 <div class="flex-row" style="justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <span>Live typing</span>
-                    <label class="switch"><input type="checkbox" id="liveEnabled" onchange="toggleLiveTyping()"><span class="slider round"></span></label>
+                    <span>Live typing <span style="color: var(--text-muted); font-size: 11px;">(keys go to host as you press them)</span></span>
+                    <label class="switch"><input type="checkbox" id="liveEnabled" checked onchange="toggleLiveTyping()"><span class="slider round"></span></label>
                 </div>
 
-                <textarea id="liveInput" spellcheck="false" placeholder="Enable Live typing, then type here — keys are sent to the host as you press them..." style="height: 220px; width: 100%;"></textarea>
+                <textarea id="liveInput" spellcheck="false" placeholder="Click here and type — keys are sent to the host live. Toggle off above to pause." style="height: 220px; width: 100%;"></textarea>
 
                 <div class="control-panel flex-row" style="margin-top: 15px; flex-wrap: wrap;">
                     <button class="control-btn" onclick="sendLiveText()">Send All Text</button>
@@ -521,6 +521,6 @@ BLINK_STOP</div>
         </div>
     </div>
 
-    <script src="script.js?v=2.6"></script>
+    <script src="script.js?v=2.7"></script>
 </body>
 </html>

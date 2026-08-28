@@ -744,8 +744,8 @@ void executeCommand(String line) {
   }
 
   // Stealth HID control (works together with Silent Startup)
-  if (line == "HID_DETACH") { hidDetach(); return; }
-  if (line == "HID_ATTACH") { hidAttach(); return; }
+  if (line == "HID_DETACH") { if (usbStarted) hidDetach(); return; }
+  if (line == "HID_ATTACH") { ensureHidReady(); return; }   // starts USB if it was deferred at boot
 
   if (line.startsWith("HOLD ")) {
     String params = line.substring(5);

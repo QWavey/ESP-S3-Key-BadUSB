@@ -1,5 +1,6 @@
 #include "USBManager.h"
 #include "DuckyInterpreter.h"
+#include <USB.h>                 // the global USB object (ESPUSB) -> USB.begin()
 #include "esp32-hal-tinyusb.h"   // pulls in tusb.h -> tud_connect/tud_disconnect/tud_mounted
 
 // ---- Stealth HID (silent startup) ------------------------------------------
@@ -26,6 +27,19 @@ bool hidAttach() {
 }
 
 void ensureHidReady() {
+  // First-ever use in silent mode: USB was never started at boot. Start it now
+  // (this is the point where the host finally enumerates the keyboard).
+  if (!usbStarted) {
+    USB.begin();
+    usbStarted = true;
+    hidConnected = true;
+    unsigned long start = millis();
+    while (!tud_mounted() && (millis() - start) < 3000) {
+      delay(10);
+    }
+    delay(300);              // give the host time to install/bind the HID driver
+    return;
+  }
   if (!hidConnected || !tud_mounted()) {
     hidAttach();
   }

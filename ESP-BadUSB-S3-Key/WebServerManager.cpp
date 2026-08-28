@@ -225,8 +225,11 @@ void setupWebServer() {
     if (!deserializeJson(doc, body)) {
       silentStartup = doc["enabled"];
       preferences.putBool("silent_boot", silentStartup);
-      if (silentStartup) hidDetach();   // remove keyboard from the bus now
-      else hidAttach();                 // present it again now
+      if (silentStartup) {
+        if (usbStarted) hidDetach();    // only unplug if USB is actually running
+      } else {
+        ensureHidReady();               // start USB if it was deferred at boot, else re-attach
+      }
     }
     server.send(200, "application/json", "{\"enabled\":" + String(silentStartup ? "true" : "false") + "}");
   });
@@ -236,7 +239,7 @@ void setupWebServer() {
     if (scriptRunning) { server.send(409, "text/plain; charset=utf-8", "Busy: a script is running"); return; }
     if (updateApplying) { server.send(409, "text/plain; charset=utf-8", "Busy: firmware update in progress"); return; }
     String body = server.arg("plain");
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(8192);   // allow larger "Send All Text" pastes
     if (deserializeJson(doc, body)) { server.send(400, "text/plain", "Invalid JSON"); return; }
 
     // Turning Live typing off asks us to detach again (when silent-startup is on)
