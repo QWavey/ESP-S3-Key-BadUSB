@@ -1423,16 +1423,41 @@ function updateErrorLens() {
                                 // via getDidYouMean if no close match.
                                 let suggestion = null;
                                 const scope = new Set([...inScopeExtFuncs, ...globalDeclaredFunctions]);
-                                // (a) segment-swap match: OS_DETECT vs
-                                // DETECT_OS have the same underscore-
-                                // separated segments, just re-ordered.
-                                // Common typo class - catch it directly.
-                                const cmdSegs = cmd.split('_').sort().join('|');
+                                const cmdSegsArr = cmd.split('_');
+                                const cmdSegsSorted = cmdSegsArr.slice().sort().join('|');
+                                // (a) exact segment-swap match: OS_DETECT vs
+                                // DETECT_OS have the same underscore-separated
+                                // segments in a different order.
                                 for (const fn of scope) {
-                                    if (fn.split('_').sort().join('|') === cmdSegs) { suggestion = fn; break; }
+                                    if (fn.split('_').sort().join('|') === cmdSegsSorted) { suggestion = fn; break; }
                                 }
-                                // (b) fall back to Levenshtein against the
-                                // in-scope function names.
+                                // (b) fuzzy segment-swap: same segment COUNT,
+                                // each segment in the typo has a close match
+                                // in the target (Levenshtein <= 1 for short
+                                // words, <= 2 for longer) - catches plurals
+                                // (FILES vs FILE), single-letter typos in one
+                                // segment, and common shortening.
+                                if (!suggestion) {
+                                    for (const fn of scope) {
+                                        const fs = fn.split('_');
+                                        if (fs.length !== cmdSegsArr.length) continue;
+                                        const target = fs.slice();
+                                        let ok = true;
+                                        for (const seg of cmdSegsArr) {
+                                            let hit = -1;
+                                            for (let k = 0; k < target.length; k++) {
+                                                const t = target[k]; if (t == null) continue;
+                                                const tol = Math.max(t.length, seg.length) >= 5 ? 2 : 1;
+                                                if (getLevenshteinDistance(seg, t) <= tol) { hit = k; break; }
+                                            }
+                                            if (hit === -1) { ok = false; break; }
+                                            target[hit] = null;
+                                        }
+                                        if (ok) { suggestion = fn; break; }
+                                    }
+                                }
+                                // (c) fall back to whole-string Levenshtein
+                                // against the in-scope function names.
                                 if (!suggestion) {
                                     let bestDist = 3;
                                     for (const fn of scope) {
@@ -1440,6 +1465,7 @@ function updateErrorLens() {
                                         if (d < bestDist) { bestDist = d; suggestion = fn; }
                                     }
                                 }
+                                // (d) finally, VALID_KEYWORDS via getDidYouMean.
                                 if (!suggestion) suggestion = getDidYouMean(cmd);
                                 if (suggestion) {
                                     errorMsg = makeError(`Unknown command '${cmd}'. Did you mean '${suggestion}'?`);
