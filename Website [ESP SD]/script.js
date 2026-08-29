@@ -5007,6 +5007,138 @@ function fcmAction(action) {
 
 
 // ============================================================
+// v4.31: per-block ˅/^ fold at the caret. Toolbar button "˅/^ Fold" and
+// Ctrl+K both invoke this. Behaviour:
+//   * If the caret is on / inside an `EXTENSION NAME ^ ... END_EXTENSION`
+//     expanded block  -> collapse it to a single `EXTENSION NAME ˅` line.
+//   * If the caret is on an `EXTENSION NAME ˅` collapsed reference line
+//     -> fetch the body from the SD and expand it inline.
+//   * Otherwise -> nothing (with a brief non-blocking toast).
+// Bulk expand/collapse-all still live in the Extensions ▾ picker; this is
+// the per-block arrow the user was looking for.
+// ============================================================
+function toggleExtensionAtCursor() {
+    const sa = document.getElementById('scriptArea');
+    if (!sa) return;
+    const caretIdx  = sa.selectionStart;
+    const src       = sa.value;
+    const before    = src.substring(0, caretIdx);
+    const caretLine = before.split('\n').length - 1;
+    const lines     = src.split('\n');
+
+    // Walk down from the caret to find its enclosing EXTENSION block.
+    // Match either the expanded opener (`EXTENSION NAME ^`), the collapsed
+    // reference (`EXTENSION NAME ˅`), or a plain `EXTENSION NAME` opener.
+    const openRE  = /^(\s*)EXTENSION\s+([A-Za-z0-9_.\-]+)(?:\s+(\^|˅))?\s*$/;
+    const closeRE = /^\s*END_EXTENSION\s*$/;
+
+    // If the caret line itself is a collapsed reference, expand it.
+    const meMatch = openRE.exec(lines[caretLine] || '');
+    if (meMatch && meMatch[3] === '˅') {
+        _expandExtensionRefLine(caretLine, meMatch[1], meMatch[2], sa, lines);
+        return;
+    }
+
+    // Otherwise search upward for an expanded opener that hasn't been closed
+    // before the caret.
+    let openIdx = -1, indent = '', name = '';
+    for (let i = caretLine; i >= 0; i--) {
+        const m = openRE.exec(lines[i] || '');
+        if (m && (m[3] === '^' || m[3] === undefined)) { openIdx = i; indent = m[1]; name = m[2]; break; }
+        if (closeRE.test(lines[i] || '') && i < caretLine) break;
+    }
+    if (openIdx < 0) {
+        _toastFold('Move the caret onto an EXTENSION line (or into its body) first.');
+        return;
+    }
+    // Find matching END_EXTENSION (nesting isn't officially defined by Hak5
+    // but be defensive against `EXTENSION` markers appearing inside the body).
+    let depth = 1, closeIdx = -1;
+    for (let j = openIdx + 1; j < lines.length; j++) {
+        const l = lines[j];
+        if (openRE.test(l)) depth++;
+        else if (closeRE.test(l)) { depth--; if (depth === 0) { closeIdx = j; break; } }
+    }
+    if (closeIdx < 0) {
+        _toastFold('Block has no END_EXTENSION - refusing to collapse.');
+        return;
+    }
+
+    // Splice: replace [openIdx..closeIdx] with a single `EXTENSION NAME ˅`.
+    const newLines = lines.slice(0, openIdx)
+        .concat([indent + 'EXTENSION ' + name + ' ˅'])
+        .concat(lines.slice(closeIdx + 1));
+    sa.value = newLines.join('\n');
+    // Put the caret back on the collapsed line.
+    let charPos = 0;
+    for (let k = 0; k < openIdx; k++) charPos += newLines[k].length + 1;
+    sa.selectionStart = sa.selectionEnd = charPos + (indent.length + ('EXTENSION ' + name + ' ˅').length);
+    sa.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function _expandExtensionRefLine(idx, indent, name, sa, lines) {
+    // Try (folder, suffix) combinations - mirrors expandAllExtensionRefs.
+    const suffixes = ['', '.txt', '.ext', '.dsx'];
+    const folders  = ['hak5', 'custom', ''];
+    const attempts = [];
+    for (const s of suffixes) for (const f of folders) attempts.push({ name: name + s, folder: f });
+    const one = (i) => {
+        if (i >= attempts.length) return Promise.resolve(null);
+        const a = attempts[i];
+        let url = '/api/load-extension?name=' + encodeURIComponent(a.name);
+        if (a.folder) url += '&folder=' + encodeURIComponent(a.folder);
+        return fetch(url).then(r => r.ok ? r.text().then(t => ({ name: a.name, body: t }))
+                                          : one(i + 1))
+                         .catch(() => one(i + 1));
+    };
+    one(0).then(res => {
+        if (!res) { _toastFold('Extension "' + name + '" not found on SD.'); return; }
+        const bodyLines = res.body.replace(/\r?\n$/, '').split('\n');
+        const stem = res.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
+        const spliced = lines.slice(0, idx)
+            .concat([indent + 'EXTENSION ' + stem + ' ^'])
+            .concat(bodyLines)
+            .concat([indent + 'END_EXTENSION'])
+            .concat(lines.slice(idx + 1));
+        sa.value = spliced.join('\n');
+        // Caret onto the opener line.
+        let charPos = 0;
+        for (let k = 0; k < idx; k++) charPos += spliced[k].length + 1;
+        sa.selectionStart = sa.selectionEnd = charPos;
+        sa.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+}
+
+let __foldToast = null;
+function _toastFold(msg) {
+    if (__foldToast) __foldToast.remove();
+    const t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);'
+        + 'background:#2a2a35;color:#fff;padding:10px 18px;border-radius:8px;'
+        + 'font-size:12px;box-shadow:0 6px 24px rgba(0,0,0,0.4);z-index:99999;'
+        + 'border:1px solid rgba(255,255,255,0.08);pointer-events:none;';
+    document.body.appendChild(t);
+    __foldToast = t;
+    setTimeout(() => { if (t.parentNode) t.remove(); if (__foldToast === t) __foldToast = null; }, 2200);
+}
+
+// Ctrl+K keyboard shortcut wired at load - non-invasive (only fires when the
+// caret is in the script editor, so it doesn't interfere with other tabs).
+if (typeof window !== 'undefined') {
+    window.addEventListener('DOMContentLoaded', () => {
+        const sa = document.getElementById('scriptArea');
+        if (!sa) return;
+        sa.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+                e.preventDefault();
+                toggleExtensionAtCursor();
+            }
+        });
+    });
+}
+
+// ============================================================
 // v4.17b: Coding editor - Extensions dropdown
 // ============================================================
 // The "Extensions ▾" toolbar button pops a small floating picker of the

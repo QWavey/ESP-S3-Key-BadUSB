@@ -75,6 +75,11 @@
                          (single `EXTENSION NAME ˅` reference line) or INLINE
                          (fully expanded body). ˅/^ toggles inline expansion. -->
                     <button class="control-btn" onclick="openExtensionInsert(event)">Extensions ▾</button>
+                    <!-- v4.31: per-block ˅/^ toggle. Collapses / expands the
+                         EXTENSION block containing the caret. Keyboard: Ctrl+K.
+                         (Bulk expand/collapse still live in the Extensions ▾
+                         picker; this is the per-block arrow.) -->
+                    <button class="control-btn" onclick="toggleExtensionAtCursor()" title="Collapse/expand the EXTENSION block at the caret (Ctrl+K)">˅/^ Fold</button>
                 </div>
 
                 <div class="section" style="margin-top: 40px; border-top: 2px solid var(--glass-border); padding-top: 30px;">
