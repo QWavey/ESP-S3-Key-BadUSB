@@ -695,7 +695,28 @@ const VALID_KEYWORDS = new Set([
     'LED_IR', 'LED_UV', 'RGB', 'RETURN', 'STOPHOLD', 'SAVE_CREDENTIALS',
     'COPY_FILE', 'CUT_FILE', 'USE_FILE', 'PASTE_FILE', 'IF_CONNECTED_TO_WIFI',
     'LOCALE_EN', 'LOCALE_DE', 'LOCALE_FR', 'LOCALE_ES', 'LOCALE_IT', 'LOCALE_UK',
-    'RANDOM_CHAR', 'RANDOM_NUMBER', 'RANDOM_SPECIAL'
+    'RANDOM_CHAR', 'RANDOM_NUMBER', 'RANDOM_SPECIAL',
+    // ---- v4.17-v4.26 Hak5 DuckyScript 3.0 corpus support (bug-fix v4.27) ----
+    // Frontend linter was flagging every one of these as "Unknown command"
+    // and drawing the red overlay ON TOP of the code (see error-line CSS).
+    // Adding them here silences the false positives so the code stays legible.
+    'EXTENSION', 'END_EXTENSION', 'RUN_EXTENSION', 'IMPORT', 'INJECT_MOD',
+    'BUTTON_DEF', 'END_BUTTON', 'DISABLE_BUTTON',
+    'WAIT_FOR_BUTTON_PRESS',
+    'WAIT_FOR_CAPS_ON', 'WAIT_FOR_CAPS_OFF',
+    'WAIT_FOR_NUM_ON',  'WAIT_FOR_NUM_OFF',
+    'WAIT_FOR_SCROLL_ON', 'WAIT_FOR_SCROLL_OFF',
+    'WAIT_FOR_CAPS_CHANGE', 'WAIT_FOR_NUM_CHANGE', 'WAIT_FOR_SCROLL_CHANGE',
+    'WAIT_FOR_EOF',
+    'HIDE_PAYLOAD', 'RESTORE_PAYLOAD', 'STOP_PAYLOAD',
+    'SOFT_BRICK', 'REVERT_TO_THUMBDRIVE', 'PERSIST',
+    'REM_BLOCK', 'END_REM',
+    'DEFINE', 'IF_DEFINED_TRUE', 'IF_NOT_DEFINED_TRUE',
+    'ELSE_DEFINED', 'END_IF_DEFINED',
+    'STRING_BASH', 'STRING_POWERSHELL', 'END_STRING', 'END_STRINGLN',
+    'RELEASE', 'MASS_STORAGE_ON', 'MASS_STORAGE_OFF',
+    'RANDOM_LETTER', 'RANDOM_LOWERCASE_LETTER', 'RANDOM_UPPERCASE_LETTER',
+    'THEN', 'CONTAINS', 'IN'
 ]);
 
 
@@ -794,6 +815,51 @@ function updateErrorLens() {
         let inFunction = false;
         let linesInBlock = 0; // Track if function has content
 
+        // v4.27 bug-hunt HIGH #4: pre-scan for opaque-body blocks whose
+        // contents are NOT DuckyScript statements and must be excluded from
+        // per-line validation. Without this, every `sudo apt-get update`
+        // inside a STRING_BASH ... END_STRING block lit up as "Unknown
+        // command 'sudo'", drowning the real errors in false positives.
+        //
+        // Blocks handled:
+        //   STRING_BASH / STRING_POWERSHELL   -> body until END_STRING(LN)
+        //   REM_BLOCK                          -> body until END_REM
+        //   EXTENSION NAME ^                   -> collapsed-inline extension
+        //                                        body until END_EXTENSION
+        // The `^` marker distinguishes an INLINED-EXPANDED extension body
+        // (which is real DuckyScript we DO want to lint) from a COLLAPSED
+        // extension body (˅ marker, one line only, no body to skip).
+        const opaqueLines = new Set();
+        {
+            let inStr = false, inRem = false, inExtInline = false;
+            for (let i = 0; i < lines.length; i++) {
+                const t = lines[i].trim();
+                const u = t.toUpperCase();
+                if (inStr) {
+                    if (u === 'END_STRING' || u === 'END_STRINGLN') { inStr = false; continue; }
+                    opaqueLines.add(i);
+                    continue;
+                }
+                if (inRem) {
+                    if (u === 'END_REM') { inRem = false; continue; }
+                    opaqueLines.add(i);
+                    continue;
+                }
+                if (inExtInline) {
+                    if (u === 'END_EXTENSION') { inExtInline = false; continue; }
+                    // Inline-expanded extension body IS ducky - do NOT mark
+                    // opaque. We only track inExtInline so that a nested
+                    // STRING_BASH block starter inside the extension works.
+                    if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; continue; }
+                    if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; continue; }
+                    continue;
+                }
+                if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; continue; }
+                if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; continue; }
+                if (u.startsWith('EXTENSION ') && t.endsWith('^')) { inExtInline = true; continue; }
+            }
+        }
+
         // Pre-scan for unclosed functions
         let lastUnclosedFunctionStart = -1;
         let funcLevel = 0;
@@ -869,6 +935,13 @@ function updateErrorLens() {
         let blockBroken = false;
 
         lines.forEach((line, i) => {
+            // v4.27 bug-hunt HIGH #4: lines inside STRING_BASH / STRING_POWERSHELL
+            // / REM_BLOCK bodies are NOT DuckyScript - render them plainly and
+            // skip every validation branch below.
+            if (opaqueLines.has(i)) {
+                highlightsHTML += `<div class="opaque-body">${escapeHtml(line)}</div>`;
+                return;
+            }
             const trimmed = line.trim();
             const upper = trimmed.toUpperCase();
             const words = trimmed.split(/\s+/);
@@ -953,18 +1026,39 @@ function updateErrorLens() {
                         }
                         inFunction = false;
                     } else if (upper === 'IF' || upper === 'IF:' || upper.startsWith('IF ') || upper.startsWith('IF_') || upper === 'RUN_ON_REBOOT' || upper === 'RUN_ON_REBOOT:' || upper.startsWith('RUN_ON_REBOOT ')) {
-                        ifCount++;
+                        // v4.27 bug-hunt HIGH #3: IF_DEFINED_TRUE / IF_NOT_DEFINED_TRUE
+                        // are Hak5 preprocessor directives, NOT runtime IF blocks
+                        // (they resolve at define-time via END_IF_DEFINED, not
+                        // ENDIF), so they must NOT bump ifCount. Skip them here.
+                        if (!upper.startsWith('IF_DEFINED_TRUE') && !upper.startsWith('IF_NOT_DEFINED_TRUE')) {
+                            ifCount++;
+                        }
                     } else if (upper.startsWith('ENDIF') || upper.startsWith('END_IF') || upper.startsWith('END_RUN_ON_REBOOT')) {
-                        ifCount--;
-                        if (ifCount < 0) { errorMsg = makeError(`Found '${cmd}' without a matching block.`); ifCount = 0; }
-                        else if (upper !== 'ENDIF' && upper !== 'END_IF' && upper !== 'END_RUN_ON_REBOOT') {
-                            const extra = trimmed.substring(cmd.length).trim();
-                            errorMsg = makeError(`${cmd} needs to be in a newline. You still have text: '${extra}'`);
+                        // v4.27 bug-hunt HIGH #3: whitelist the preprocessor pair
+                        // END_IF_DEFINED / END_IF_NOT_DEFINED / END_IF_NOT_DEFINED_TRUE
+                        // - they DON'T decrement ifCount (no matching IF pushed one)
+                        // and they aren't "leftover text" errors.
+                        const preprocEnd =
+                            upper === 'END_IF_DEFINED' || upper === 'END_IF_NOT_DEFINED' ||
+                            upper === 'END_IF_NOT_DEFINED_TRUE';
+                        if (preprocEnd) {
+                            // no-op: preprocessor terminator
+                        } else {
+                            ifCount--;
+                            if (ifCount < 0) { errorMsg = makeError(`Found '${cmd}' without a matching block.`); ifCount = 0; }
+                            else if (upper !== 'ENDIF' && upper !== 'END_IF' && upper !== 'END_RUN_ON_REBOOT') {
+                                const extra = trimmed.substring(cmd.length).trim();
+                                errorMsg = makeError(`${cmd} needs to be in a newline. You still have text: '${extra}'`);
+                            }
                         }
                     } else if (upper.startsWith('ELSE')) {
-                        if (ifCount <= 0) {
+                        // v4.27 bug-hunt HIGH #3: ELSE_DEFINED is the preprocessor
+                        // sibling of IF_DEFINED_TRUE - not the runtime ELSE clause.
+                        if (upper === 'ELSE_DEFINED') {
+                            // no-op: preprocessor branch marker
+                        } else if (ifCount <= 0) {
                             errorMsg = makeError("Found 'ELSE' without a matching 'IF' block.");
-                        } else if (upper !== 'ELSE') {
+                        } else if (upper !== 'ELSE' && !upper.startsWith('ELSE IF') && !upper.startsWith('ELIF')) {
                             const extra = trimmed.substring(cmd.length).trim();
                             errorMsg = makeError(`ELSE needs to be in a newline. You still have text: '${extra}'`);
                         }
@@ -1036,7 +1130,10 @@ function updateErrorLens() {
                         // NOTE: SIZE_XX_UNIT (e.g. SIZE_22_GB) is a Hak5-compatible token
                         // that may appear standalone OR inside an ATTACKMODE line - always accept.
                         // HID_ prefix covers HID_ATTACH / HID_DETACH.
-                        const isPrefixCmd = /^(VID_|PID_|MAN_|PRODUCT_|HOLD_|HOLD_TILL_|SIZE_|HID_|LED_|BLINK_LED_|LOCALE_|RANDOM_|IF_)/.test(cmd);
+                        // v4.27: WAIT_FOR_ and INJECT_ prefixes cover the v3.0 Hak5
+                        // families (WAIT_FOR_CAPS_*, INJECT_MOD, etc.) so future
+                        // additions in that namespace don't spurious-error.
+                        const isPrefixCmd = /^(VID_|PID_|MAN_|PRODUCT_|HOLD_|HOLD_TILL_|SIZE_|HID_|LED_|BLINK_LED_|LOCALE_|RANDOM_|IF_|WAIT_FOR_|INJECT_)/.test(cmd);
                         const isKeyword = VALID_KEYWORDS.has(cmd);
                         const isDeclaredVar = globalDeclaredVars.has(cmd);
 
@@ -1086,9 +1183,15 @@ function updateErrorLens() {
             if (errorMsg || isBlockErrorLine) {
                 const isWarning = errorMsg ? errorMsg.type === 'warning' : false;
                 const msgText = errorMsg ? (errorMsg.text || (typeof errorMsg === 'string' ? errorMsg : 'Unknown Issue')) : (blockError || "");
+                // v4.27 bug-hunt HIGH #5: msgText may contain the user's own text
+                // (e.g. `Unknown command '<img src=x onerror=...>'`), and it goes
+                // into innerHTML below. Escape it once here so both the tooltip
+                // attribute AND the visible span get safe HTML.
+                const msgHtml = escapeHtml(msgText);
+                const msgTitle = msgHtml.replace(/"/g, '&quot;');
                 const className = isWarning ? 'warning-line' : 'error-line';
                 const lensClass = isWarning ? 'inline-warning' : 'inline-error';
-                
+
                 const isFixable = !isWarning && (msgText && (msgText.includes("Did you mean") || msgText.includes("END_FUNCTION")));
                 // Only push to error list if it's the first line of block error or a normal error
                 if (errorMsg || i === lastUnclosedFunctionStart) {
@@ -1102,10 +1205,10 @@ function updateErrorLens() {
                 const scopeClass = isScoped ? `scope-guide ${isBlockErrorLine ? 'scope-error' : ''}` : '';
                 let lineContent = `<div class="${className} ${scopeClass}" style="position: relative; white-space: pre;">`;
                 if (isWarning) {
-                    lineContent += `<span class="warning-text">${hlLine}</span><span class="${lensClass}" title="${msgText.replace(/"/g, '&quot;')}">${msgText}</span>`;
+                    lineContent += `<span class="warning-text">${hlLine}</span><span class="${lensClass}" title="${msgTitle}">${msgHtml}</span>`;
                     lineContent += `<button class="ignore-btn-inline" style="pointer-events: auto;" onclick="event.stopPropagation(); ignoreWarning(${i}, '${errorMsg ? (errorMsg.var || '') : ''}', this)">Ignore</button>`;
                 } else {
-                    lineContent += `<span>${hlLine}</span><span class="${lensClass}" title="${msgText.replace(/"/g, '&quot;')}">${msgText}</span>`;
+                    lineContent += `<span>${hlLine}</span><span class="${lensClass}" title="${msgTitle}">${msgHtml}</span>`;
                 }
                 lineContent += `</div>`;
                 highlightsHTML += lineContent;
@@ -1132,10 +1235,12 @@ function updateErrorLens() {
                     const isError = e.type === 'error';
                     const itemClass = isError ? 'error-item' : 'warning-item';
                     const icon = isError ? '✕' : '▲';
+                    // v4.27 bug-hunt HIGH #5: escape user-derived text before
+                    // splicing it into the panel's innerHTML.
                     return `
                         <div class="issue-item ${itemClass}" onclick="jumpToLine(${e.line})">
                             <div class="issue-icon">${icon}</div>
-                            <div class="issue-text">${e.text}</div>
+                            <div class="issue-text">${escapeHtml(e.text)}</div>
                         </div>`;
                 }).join('');
                 lastErrorState = newState;
@@ -1260,9 +1365,29 @@ function refreshFiles() {
         const list = document.getElementById('fileList');
         list.innerHTML = '';
         files.forEach(f => {
+            // v4.27 bug-hunt CRITICAL #1: previous version interpolated the
+            // filename directly into an onclick= attribute AND into a JS-string
+            // argument, so a name like `foo'); fetch('/api/self-destruct',
+            // {method:'POST'}); //` broke out into admin-origin JS. Build via
+            // DOM + textContent + addEventListener so the filename never
+            // touches HTML or a JS string.
             const item = document.createElement('div');
             item.className = 'file-item';
-            item.innerHTML = `<span>${f}</span><div class="flex-row"><button onclick="loadFile('${f}')">Load</button><button class="danger" onclick="deleteFile('${f}')">Del</button></div>`;
+            const name = document.createElement('span');
+            name.textContent = f;
+            const row = document.createElement('div');
+            row.className = 'flex-row';
+            const loadBtn = document.createElement('button');
+            loadBtn.textContent = 'Load';
+            loadBtn.addEventListener('click', () => loadFile(f));
+            const delBtn = document.createElement('button');
+            delBtn.className = 'danger';
+            delBtn.textContent = 'Del';
+            delBtn.addEventListener('click', () => deleteFile(f));
+            row.appendChild(loadBtn);
+            row.appendChild(delBtn);
+            item.appendChild(name);
+            item.appendChild(row);
             list.appendChild(item);
         });
     });
@@ -1300,10 +1425,31 @@ function refreshFileBrowser() {
     fetch('/api/list-files?path=' + encodeURIComponent(currentBrowserPath)).then(r => r.json()).then(files => {
         browser.innerHTML = '';
         document.getElementById('currentDirDisplay').textContent = currentBrowserPath;
+        // v4.27 bug-hunt CRITICAL #1: rebuild via DOM API so file.name /
+        // file.path never touch an inline onclick or interpolated JS-string.
+        // The old innerHTML template splat both fields into onclick= and into
+        // navigateToDirectory('${path}') - a crafted filename could inject
+        // admin-origin JS.
         files.forEach(file => {
             const item = document.createElement('div');
             item.className = 'file-browser-item';
-            item.innerHTML = `<span style="cursor:pointer; color:${file.isDirectory?'var(--primary)':'white'}" onclick="${file.isDirectory?`navigateToDirectory('${file.path}')`:`selectFileInBrowser(this, ${JSON.stringify(file)})`}">${file.name}${file.isDirectory?'/':''}</span><button class="danger" style="padding:2px 6px; font-size:10px;" onclick="deleteBrowserFile('${file.path}')">Del</button>`;
+            const label = document.createElement('span');
+            label.style.cssText = 'cursor:pointer;color:' + (file.isDirectory ? 'var(--primary)' : 'white');
+            label.textContent = file.name + (file.isDirectory ? '/' : '');
+            if (file.isDirectory) {
+                label.addEventListener('click', () => navigateToDirectory(file.path));
+            } else {
+                // Pass the file object through closure, not through a serialized
+                // JSON.stringify splat that ended up in an attribute value.
+                label.addEventListener('click', function () { selectFileInBrowser(this, file); });
+            }
+            const delBtn = document.createElement('button');
+            delBtn.className = 'danger';
+            delBtn.style.cssText = 'padding:2px 6px;font-size:10px;';
+            delBtn.textContent = 'Del';
+            delBtn.addEventListener('click', () => deleteBrowserFile(file.path));
+            item.appendChild(label);
+            item.appendChild(delBtn);
             browser.appendChild(item);
         });
     });
@@ -1843,6 +1989,12 @@ function initAutocomplete() {
 // Argument-suggestion maps for multi-token commands. The autocomplete popup
 // pops up after "<CMD> " and every subsequent partial token, so users get
 // hints for e.g. `ATTACKMODE B|` → BLANK, or `LOCALE d|` → de.
+//
+// v4.27: EXTENSION / RUN_EXTENSION / IMPORT get populated at runtime from
+// /api/list-extensions so a user typing `EXTENSION os|` sees the actual
+// extension filenames on the SD (was previously "no autocomplete for
+// extensions"). Pool is refreshed whenever refreshExtensions() runs and on
+// first-use so the Script tab picks up new SDs / uploads without reload.
 const ARG_SUGGESTIONS = {
     'ATTACKMODE': [
         'HID', 'STORAGE', 'HID STORAGE', 'STORAGE_ONLY', 'MSC_ONLY',
@@ -1853,10 +2005,66 @@ const ARG_SUGGESTIONS = {
         'SIZE_8_GB', 'SIZE_16_GB', 'SIZE_32_GB', 'SIZE_64_GB',
         'SIZE_100_MB', 'SIZE_500_MB',
     ],
-    'LOCALE': ['us', 'de', 'fr', 'es', 'it', 'uk'],
-    'IF_OS': ['WINDOWS', 'LINUX', 'MAC', 'ANDROID', 'IOS'],
-    'LED': ['ON', 'OFF', 'BLINK', 'STOP', '255 0 0', '0 255 0', '0 0 255'],
+    'LOCALE':          ['us', 'de', 'fr', 'es', 'it', 'uk'],
+    'IF_OS':           ['WINDOWS', 'LINUX', 'MAC', 'ANDROID', 'IOS'],
+    'LED':             ['ON', 'OFF', 'BLINK', 'STOP', '255 0 0', '0 255 0', '0 0 255'],
+    'INJECT_MOD':      ['CTRL', 'SHIFT', 'ALT', 'GUI', 'WINDOWS', 'COMMAND',
+                        'RIGHT_CTRL', 'RIGHT_SHIFT', 'RIGHT_ALT', 'RIGHT_GUI', 'ALTGR'],
+    'EXTENSION':       [],   // populated by refreshExtensionAutocompletePool()
+    'RUN_EXTENSION':   [],
+    'IMPORT':          [],
+    'END_EXTENSION':   [],
 };
+
+// v4.27: cache of extension filenames for the autocomplete pool. Refreshed
+// whenever the Extensions tab lists (via refreshExtensions) and lazily on
+// first Script-tab keystroke that hits an EXTENSION-family token.
+let __extNamePool = [];
+let __extNamePoolLoading = false;
+let __extNamePoolRefetch = false;   // v4.27 bug-hunt HIGH #6: coalesce
+function refreshExtensionAutocompletePool() {
+    if (__extNamePoolLoading) {
+        // A refresh is already in flight - mark for a follow-up so a Pull /
+        // Save / Delete that arrives mid-fetch still ends up in the pool.
+        __extNamePoolRefetch = true;
+        return;
+    }
+    __extNamePoolLoading = true;
+    fetch('/api/list-extensions').then(r => r.json()).then(data => {
+        const all = []
+            .concat(Array.isArray(data.hak5)   ? data.hak5   : [])
+            .concat(Array.isArray(data.custom) ? data.custom : [])
+            .concat(Array.isArray(data.legacy) ? data.legacy : []);
+        // Offer both the full filename ("os_detect.txt") and the bare stem
+        // ("os_detect") so `EXTENSION os_d|` completes to whatever the user
+        // is typing toward.
+        const names = new Set();
+        for (const f of all) {
+            if (!f || !f.name) continue;
+            names.add(f.name);
+            const stem = f.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
+            if (stem && stem !== f.name) names.add(stem);
+        }
+        __extNamePool = Array.from(names).sort();
+        // Rebind the ARG_SUGGESTIONS slots so the handler picks them up.
+        ARG_SUGGESTIONS['EXTENSION']     = __extNamePool;
+        ARG_SUGGESTIONS['RUN_EXTENSION'] = __extNamePool;
+        ARG_SUGGESTIONS['IMPORT']        = __extNamePool;
+        ARG_SUGGESTIONS['END_EXTENSION'] = __extNamePool;
+    }).catch(() => { /* silent: keep whatever pool we had */ })
+      .finally(() => {
+          __extNamePoolLoading = false;
+          if (__extNamePoolRefetch) {
+              __extNamePoolRefetch = false;
+              refreshExtensionAutocompletePool();
+          }
+      });
+}
+// Prime the pool at first paint so the Script tab has it before the user
+// even opens the Extensions tab.
+if (typeof window !== 'undefined') {
+    window.addEventListener('load', refreshExtensionAutocompletePool);
+}
 
 function handleAutocompleteInput(e) {
     const scriptArea = e.target;
@@ -1869,7 +2077,11 @@ function handleAutocompleteInput(e) {
 
     const trimmed = currentLine.trimStart();
     const words = trimmed.split(/\s+/);
-    const firstWord = (words[0] || '').toUpperCase();
+    let firstWord = (words[0] || '').toUpperCase();
+    // v4.27 bug-hunt MEDIUM #10: DuckyScript accepts `IF:`, `FOR:`,
+    // `ATTACKMODE:` and other trailing-colon forms; strip it before the
+    // ARG_SUGGESTIONS lookup so `ATTACKMODE: HID |` still suggests args.
+    if (firstWord.endsWith(':')) firstWord = firstWord.slice(0, -1);
 
     // ---- Argument-position autocomplete for known multi-token commands ----
     // Triggers when there IS a space in the current line and the first word
@@ -2061,11 +2273,14 @@ function applyAutocomplete(suggestion, scriptArea, lineStart, cursor) {
     scriptArea.value = before + newLine + after;
     scriptArea.selectionStart = scriptArea.selectionEnd = lineStart + newLine.length;
     hideAutocomplete();
+    // v4.27 bug-hunt HIGH #2: previously we followed updateErrorLens() with a
+    // second overwrite that joined lines with a raw '\n' (which HTML collapses
+    // to a space) - every editor row rendered as one long inline strip, cursor
+    // sync broke, and errors painted by updateErrorLens were thrown away.
+    // updateErrorLens already refreshes the highlights correctly, so drop the
+    // overwrite.
     updateErrorLens();
-    const hl = document.getElementById('editorHighlights');
-    if (hl) {
-        hl.innerHTML = scriptArea.value.split('\n').map(applyHighlighting).join('\n');
-    }
+    updateGutter();
 }
 
 
@@ -4333,6 +4548,9 @@ function refreshExtensions() {
         if (legacy.length > 0) {
             renderSection('Legacy (/extensions root, pre-v4.22)',          legacy, '', '');
         }
+        // v4.27: piggy-back on the same list to keep the Script-tab
+        // EXTENSION-arg autocomplete in sync.
+        refreshExtensionAutocompletePool();
     }).catch(e => { box.textContent = 'Failed to list extensions: ' + e.message; });
 }
 
@@ -4674,29 +4892,44 @@ function openExtensionInsert(evt) {
                             '<span style="opacity:0.6;font-size:11px;">' + f.size + ' B</span>';
             row.onmouseover = () => row.style.background = 'rgba(76,175,80,0.15)';
             row.onmouseout  = () => row.style.background = '';
-            row.onclick = () => {
-                menu.remove();
-                document.removeEventListener('click', closeOnce, true);
-                const choice = confirm(
-                    'Insert extension "' + f.name + '":\n\n' +
-                    'OK  = INLINE (fetches the body and pastes it fully expanded, wrapped in EXTENSION/END_EXTENSION)\n' +
-                    'Cancel = COLLAPSED (inserts a single "EXTENSION ' + f.name + ' ˅" reference line - stays short, expandable later)'
-                );
-                if (choice) {
-                    // Inline: fetch body then insert.
+            // v4.27 bug-hunt HIGH #8: replace the synchronous confirm() (which
+            // mobile browsers block with "Prevent additional dialogs" and
+            // whose Enter-key confirm bubbled back through the outside-click
+            // handler tearing down the picker mid-choice) with an inline
+            // two-button popover rendered inside the picker itself.
+            row.onclick = (ev) => {
+                ev.stopPropagation();   // don't wake closeOnce with our own click
+                // Replace this row's content with an inline Inline/Collapsed picker.
+                row.innerHTML = '';
+                row.style.cssText += ';flex-direction:column;align-items:stretch;';
+                const label = document.createElement('div');
+                label.style.cssText = 'font-size:12px;opacity:0.75;margin-bottom:6px;';
+                label.textContent = 'Insert "' + f.name + '" as:';
+                const btnRow = document.createElement('div');
+                btnRow.style.cssText = 'display:flex;gap:6px;';
+                const mkBtn = (text, handler) => {
+                    const b = document.createElement('button');
+                    b.textContent = text;
+                    b.style.cssText = 'flex:1;padding:8px;border-radius:6px;background:#2a2a35;color:#fff;border:none;cursor:pointer;font-size:12px;';
+                    b.addEventListener('click', (e) => { e.stopPropagation(); menu.remove(); document.removeEventListener('click', closeOnce, true); handler(); });
+                    return b;
+                };
+                btnRow.appendChild(mkBtn('Inline (expand body)', () => {
                     fetch('/api/load-extension?name=' + encodeURIComponent(f.name) +
                           (f.folder ? '&folder=' + encodeURIComponent(f.folder) : ''))
-                        .then(r => r.text())
+                        .then(r => r.ok ? r.text() : Promise.reject('HTTP ' + r.status))
                         .then(body => insertAtEditorCursor(
-                            'EXTENSION ' + f.name.replace(/\.(txt|dsx|dd)$/i, '') + ' ^\n' +
+                            'EXTENSION ' + f.name.replace(/\.(txt|ext|dsx|dd)$/i, '') + ' ^\n' +
                             body.replace(/\r?\n$/, '') + '\n' +
                             'END_EXTENSION\n'
                         ))
                         .catch(err => alert('Failed to fetch extension: ' + err));
-                } else {
-                    // Collapsed reference. Runtime will RUN_EXTENSION it.
-                    insertAtEditorCursor('EXTENSION ' + f.name.replace(/\.(txt|dsx|dd)$/i, '') + ' ˅\n');
-                }
+                }));
+                btnRow.appendChild(mkBtn('Collapsed (reference)', () => {
+                    insertAtEditorCursor('EXTENSION ' + f.name.replace(/\.(txt|ext|dsx|dd)$/i, '') + ' ˅\n');
+                }));
+                row.appendChild(label);
+                row.appendChild(btnRow);
             };
             menu.appendChild(row);
         });
@@ -4729,28 +4962,42 @@ function expandAllExtensionRefs() {
     if (jobs.length === 0) { alert('No collapsed extension references (˅) found.'); return; }
     // Fetch all bodies then splice into the lines array from bottom up
     // (so indices don't shift).
+    // v4.27 bug-hunt HIGH #7: (a) try each folder in turn (hak5, custom,
+    // root) so extensions saved to /extensions/custom/*.ext still resolve.
+    // Previously the fetch omitted ?folder= and only found /extensions/hak5
+    // entries. (b) add an outer .catch so a network drop / ESP reset
+    // surfaces to the user instead of silently leaving the editor
+    // half-mutated.
     Promise.all(jobs.map(j => {
-        // Try common suffixes so `EXTENSION FOO ˅` resolves to FOO.txt/dsx.
-        const tries = [j.name, j.name + '.txt', j.name + '.dsx'];
-        const one = (i) => fetch('/api/load-extension?name=' + encodeURIComponent(tries[i]))
-            .then(r => r.ok ? r.text().then(t => ({ ok:true, name:tries[i], body:t })) :
-                              (i + 1 < tries.length ? one(i+1) : { ok:false, name:j.name }));
+        const suffixes = ['', '.txt', '.ext', '.dsx'];
+        const folders  = ['hak5', 'custom', ''];
+        const attempts = [];
+        for (const s of suffixes) for (const f of folders) attempts.push({ name: j.name + s, folder: f });
+        const one = (i) => {
+            if (i >= attempts.length) return { ok:false, name:j.name };
+            const a = attempts[i];
+            let url = '/api/load-extension?name=' + encodeURIComponent(a.name);
+            if (a.folder) url += '&folder=' + encodeURIComponent(a.folder);
+            return fetch(url).then(r => r.ok ? r.text().then(t => ({ ok:true, name:a.name, body:t }))
+                                              : one(i + 1))
+                             .catch(() => one(i + 1));
+        };
         return one(0);
     })).then(results => {
         const failed = [];
         for (let i = jobs.length - 1; i >= 0; i--) {
             const j = jobs[i]; const r = results[i];
-            if (!r.ok) { failed.push(j.name); continue; }
+            if (!r || !r.ok) { failed.push(j.name); continue; }
             const bodyLines = r.body.replace(/\r?\n$/, '').split('\n');
             lines.splice(j.idx, 1,
-                'EXTENSION ' + r.name.replace(/\.(txt|dsx|dd)$/i, '') + ' ^',
+                'EXTENSION ' + r.name.replace(/\.(txt|ext|dsx|dd)$/i, '') + ' ^',
                 ...bodyLines,
                 'END_EXTENSION');
         }
         sa.value = lines.join('\n');
         sa.dispatchEvent(new Event('input', { bubbles: true }));
         if (failed.length) alert('Not found on SD: ' + failed.join(', '));
-    });
+    }).catch(err => alert('Expand failed: ' + (err && err.message ? err.message : err)));
 }
 
 // Collapse each expanded `EXTENSION <NAME> ^ ... END_EXTENSION` block back
@@ -4807,7 +5054,11 @@ function collapseAllExtensionBodies() {
                 sa.value = rewritten;
                 try { orig.apply(this, arguments); } finally {
                     sa.value = before;
-                    sa.dispatchEvent(new Event('input', { bubbles: true }));
+                    // v4.27 bug-hunt MEDIUM #9: don't dispatch a fake `input`
+                    // - nothing changed for the user, and firing it kicks
+                    // updateErrorLens / autocomplete / draft-save mid-run.
+                    // The lens is already up to date; the textarea is
+                    // pixel-identical.
                 }
                 return;
             }

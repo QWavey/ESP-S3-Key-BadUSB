@@ -210,9 +210,12 @@ textarea {
     -webkit-text-fill-color: transparent; /* Force transparency for Chrome */
 }
 
-/* Standalone textareas (Live input, Boot preview) are normal in-flow boxes,
-   not part of the transparent editor-overlay used by #scriptArea. */
-#liveInput, #bootScriptPreview {
+/* Standalone textareas (Live input, Boot preview, Extensions editor) are
+   normal in-flow boxes, NOT part of the transparent editor-overlay used by
+   #scriptArea. v4.27 bug fix: #extEditor was missing here so text typed on
+   the Extensions tab was invisible (inherited color:transparent + the
+   -webkit-text-fill-color:transparent from the global textarea rule). */
+#liveInput, #bootScriptPreview, #extEditor {
     position: relative;
     top: auto;
     left: auto;
@@ -486,6 +489,18 @@ select:focus, input:focus {
     max-width: 45%;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* v4.27: on narrow / mobile viewports the absolute-positioned inline
+   error/warning message was landing ON TOP of the code text (visible in
+   the "89 issues found" screenshot). Hide the inline text there - the red
+   background tint, the "✕ N ISSUES FOUND" chip and the issues panel still
+   surface every problem, and the tooltip (`title=`) is one tap away. */
+@media (max-width: 768px) {
+    .inline-error,
+    .inline-warning {
+        display: none !important;
+    }
 }
 
 .inline-warning {
