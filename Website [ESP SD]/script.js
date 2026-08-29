@@ -1395,13 +1395,52 @@ function updateErrorLens() {
                             if (VALID_KEYWORDS.has(seg)) return true;
                             return /^(CTRL|CONTROL|SHIFT|ALT|GUI|WINDOWS|META|COMMAND|CMD|OPTION|ALTGR|F([1-9]|1[0-2])|[A-Z0-9])$/.test(seg);
                         });
+                        // v4.31 (bare-call): the Hak5 dialect accepts
+                        // `DETECT_OS` / `HELLO_OS` at top level as a bare
+                        // call to a user function (no parens). If the
+                        // in-scope extension-function set (or the local
+                        // FUNCTION scanner) knows about this name, accept
+                        // it as a call - don't complain that it's an
+                        // "Unknown command". Same for a user's own local
+                        // FUNCTION FOO() { ... } END_FUNCTION invoked as
+                        // just `FOO` (Ducky firmware matches functionTable
+                        // for bare identifiers too, see DuckyInterpreter
+                        // .cpp:797-802 - `potentialFunc = line` strips a
+                        // trailing `()` but works without one either way).
+                        const isBareFuncCall = globalDeclaredFunctions.has(cmd) || inScopeExtFuncs.has(cmd);
 
-                        if (!isKeyword && !isDeclaredVar && !isPrefixCmd && !isDefineRef && !isComboKey) {
+                        if (!isKeyword && !isDeclaredVar && !isPrefixCmd && !isDefineRef && !isComboKey && !isBareFuncCall) {
                             if (cmd.endsWith(':')) {
                                 const name = cmd.slice(0, -1);
                                 errorMsg = makeError(`Unknown command '${cmd}'. Did you mean 'FUNCTION ${name}'?`);
                             } else {
-                                const suggestion = getDidYouMean(cmd);
+                                // v4.31 (typo help): first check in-scope
+                                // extension functions and locally-defined
+                                // FUNCTIONs for a near match - a user who
+                                // typed `OS_DETECT` while referencing the
+                                // OS_DETECT extension probably meant
+                                // `DETECT_OS`. Falls back to VALID_KEYWORDS
+                                // via getDidYouMean if no close match.
+                                let suggestion = null;
+                                const scope = new Set([...inScopeExtFuncs, ...globalDeclaredFunctions]);
+                                // (a) segment-swap match: OS_DETECT vs
+                                // DETECT_OS have the same underscore-
+                                // separated segments, just re-ordered.
+                                // Common typo class - catch it directly.
+                                const cmdSegs = cmd.split('_').sort().join('|');
+                                for (const fn of scope) {
+                                    if (fn.split('_').sort().join('|') === cmdSegs) { suggestion = fn; break; }
+                                }
+                                // (b) fall back to Levenshtein against the
+                                // in-scope function names.
+                                if (!suggestion) {
+                                    let bestDist = 3;
+                                    for (const fn of scope) {
+                                        const d = getLevenshteinDistance(cmd, fn);
+                                        if (d < bestDist) { bestDist = d; suggestion = fn; }
+                                    }
+                                }
+                                if (!suggestion) suggestion = getDidYouMean(cmd);
                                 if (suggestion) {
                                     errorMsg = makeError(`Unknown command '${cmd}'. Did you mean '${suggestion}'?`);
                                 } else {
