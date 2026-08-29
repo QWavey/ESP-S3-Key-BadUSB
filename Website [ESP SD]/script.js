@@ -681,7 +681,13 @@ const VALID_KEYWORDS = new Set([
     'IF_PRESENT', 'IF_NOTPRESENT', 'IF_BT_PRESENT', 'IF_ONLINE', 'IF_OFFLINE', 'IF_OS', 'IF_DETECT_OS_INCLUDES', 'IF_NOT_PRESENT',
     'IF_CLIENT_CONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_BLUETOOTH', 
     'IF_CLIENT_CONNECTED', 'IF_CLIENT_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED_BLUETOOTH', 
-    'IF_CLIENT_CONNECTED_DISCONNECTED_WIFI', 'DETECT_OS', 'WAIT_FOR_SD', 'HOLD', 'KEYCODE', 'HOLD_TILL_STRING', 'CD', 'SET_BUTTON_PIN', 'RUN_PAYLOAD',
+    // v4.31: DETECT_OS removed from VALID_KEYWORDS - it's an extension-defined
+    // function (OS_DETECT extension), not a firmware built-in. Autocomplete and
+    // the linter now surface it ONLY when the current script references the
+    // extension that defines it (via __extFunctionsByStem). Same reasoning
+    // applies to HELLO_OS, TRANSLATE_*, RUN_LINUX/WINDOWS_EXFIL, etc. - none
+    // are firmware built-ins, all live in extensions.
+    'IF_CLIENT_CONNECTED_DISCONNECTED_WIFI', 'WAIT_FOR_SD', 'HOLD', 'KEYCODE', 'HOLD_TILL_STRING', 'CD', 'SET_BUTTON_PIN', 'RUN_PAYLOAD',
     'FUNCTION', 'DEF_', 'RANDOM_CHAR', 'RANDOM_NUMBER', 'RANDOM_SPECIAL', 'END_FUNCTION', 'END_DEF', 'BEGIN_ROWER', 'END_ROWER',
     'UPARROW', 'DOWNARROW', 'LEFTARROW', 'RIGHTARROW', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'ESCAPE', 'DEL', 'WINDOWS', 'CONTROL', 'NUMLOCK', 'FROM', 'TO', 'STEP', 'LOCALE',
     'VID_', 'PID_', 'MAN_', 'PRODUCT_', 'LED_BLINK', 'BLINK_STOP', 'RUN_ON_REBOOT', 'END_RUN_ON_REBOOT', 'BLUETOOTH_DISCOVERY',
@@ -984,6 +990,9 @@ function updateErrorLens() {
         const processedFunctions = new Set();
         let highlightsHTML = '';
         let blockBroken = false;
+        // v4.31: compute this once for the whole pass - it walks every
+        // EXTENSION ref line and unions the cached function-name lists.
+        const inScopeExtFuncs = _autocompleteFunctionsFromReferencedExtensions(scriptArea.value);
 
         lines.forEach((line, i) => {
             // v4.27 bug-hunt HIGH #4: lines inside STRING_BASH / STRING_POWERSHELL
@@ -1262,13 +1271,26 @@ function updateErrorLens() {
                             'SAVE_HOST_KEYBOARD_LOCK_STATE',
                             'RESTORE_HOST_KEYBOARD_LOCK_STATE',
                             'PERSIST', 'CONSUME', 'DISABLE_BUTTON',
-                            'DETECT_OS', 'GET_TIME', 'GET_DAY'
+                            // v4.31: DETECT_OS removed - extension-defined,
+                            // gated by inScopeExtFuncs below. GET_TIME/GET_DAY
+                            // stay - they're firmware built-ins (see
+                            // DuckyInterpreter.cpp:1903).
+                            'GET_TIME', 'GET_DAY'
                         ]);
                         if (isDefineHead) {
                             // no-op: DEFINE value; the DEFINE handler is elsewhere
                         } else if (builtinCall.has(fName)) {
                             // Recognised built-in - accept the `()` invocation form.
-                        } else if (!globalDeclaredFunctions.has(fName)) errorMsg = makeError(`Call to undefined function: '${fName}()'`);
+                        } else if (!globalDeclaredFunctions.has(fName)
+                                   // v4.31: also accept functions the script
+                                   // pulls in via a collapsed `EXTENSION NAME ˅`
+                                   // reference - the linter can't see the body
+                                   // but the extension-body cache built by
+                                   // refreshExtensionAutocompletePool knows the
+                                   // names, hoisted into inScopeExtFuncs above.
+                                   && !inScopeExtFuncs.has(fName)) {
+                            errorMsg = makeError(`Call to undefined function: '${fName}()'`);
+                        }
                     } else {
                         // FALLBACK: Unknown command or variable check
                         // NOTE: SIZE_XX_UNIT (e.g. SIZE_22_GB) is a Hak5-compatible token
@@ -2200,9 +2222,13 @@ const ARG_SUGGESTIONS = {
 // v4.27: cache of extension filenames for the autocomplete pool. Refreshed
 // whenever the Extensions tab lists (via refreshExtensions) and lazily on
 // first Script-tab keystroke that hits an EXTENSION-family token.
+// v4.31: also caches each extension's FUNCTION names in __extFunctionsByStem
+// (stem -> ['DETECT_OS', 'HELLO_OS', ...]) so the Script-tab autocomplete
+// can surface those callables IFF the current script references the ext.
 let __extNamePool = [];
 let __extNamePoolLoading = false;
 let __extNamePoolRefetch = false;   // v4.27 bug-hunt HIGH #6: coalesce
+let __extFunctionsByStem = {};      // v4.31: stem -> [functionName, ...]
 function refreshExtensionAutocompletePool() {
     if (__extNamePoolLoading) {
         // A refresh is already in flight - mark for a follow-up so a Pull /
@@ -2211,11 +2237,11 @@ function refreshExtensionAutocompletePool() {
         return;
     }
     __extNamePoolLoading = true;
-    fetch('/api/list-extensions').then(r => r.json()).then(data => {
+    fetch('/api/list-extensions').then(r => r.json()).then(async data => {
         const all = []
-            .concat(Array.isArray(data.hak5)   ? data.hak5   : [])
-            .concat(Array.isArray(data.custom) ? data.custom : [])
-            .concat(Array.isArray(data.legacy) ? data.legacy : []);
+            .concat(Array.isArray(data.hak5)   ? data.hak5.map(f => ({...f, folder:'hak5'}))     : [])
+            .concat(Array.isArray(data.custom) ? data.custom.map(f => ({...f, folder:'custom'})) : [])
+            .concat(Array.isArray(data.legacy) ? data.legacy.map(f => ({...f, folder:''}))       : []);
         // Offer both the full filename ("os_detect.txt") and the bare stem
         // ("os_detect") so `EXTENSION os_d|` completes to whatever the user
         // is typing toward.
@@ -2232,6 +2258,37 @@ function refreshExtensionAutocompletePool() {
         ARG_SUGGESTIONS['RUN_EXTENSION'] = __extNamePool;
         ARG_SUGGESTIONS['IMPORT']        = __extNamePool;
         ARG_SUGGESTIONS['END_EXTENSION'] = __extNamePool;
+
+        // v4.31: fetch each ext body once, extract FUNCTION names, cache under
+        // the bare stem AND the full filename. Small (~110KB total across the
+        // Hak5 corpus), done in parallel, best-effort - if any fetch fails we
+        // just skip that one. The cache is used by handleAutocompleteInput to
+        // surface `DETECT_OS`/`HELLO_OS`/etc. ONLY when the current script
+        // references the extension that defines them.
+        const nextMap = {};
+        await Promise.all(all.map(f => {
+            let url = '/api/load-extension?name=' + encodeURIComponent(f.name);
+            if (f.folder) url += '&folder=' + encodeURIComponent(f.folder);
+            return fetch(url).then(r => r.ok ? r.text() : '').then(txt => {
+                if (!txt) return;
+                // Robust FUNCTION-name scan: matches "FUNCTION NAME" (with or
+                // without () and with any indentation). Ignores REM lines.
+                const funcs = new Set();
+                for (const raw of txt.split('\n')) {
+                    const line = raw.trim();
+                    if (!line || line.startsWith('REM') || line.startsWith('//')) continue;
+                    const m = line.match(/^FUNCTION\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(?\)?\s*$/i);
+                    if (m) funcs.add(m[1].toUpperCase());
+                }
+                const arr = Array.from(funcs);
+                const stem = f.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
+                if (arr.length) {
+                    nextMap[f.name.toUpperCase()] = arr;
+                    if (stem && stem !== f.name) nextMap[stem.toUpperCase()] = arr;
+                }
+            }).catch(() => { /* skip this one */ });
+        }));
+        __extFunctionsByStem = nextMap;
     }).catch(() => { /* silent: keep whatever pool we had */ })
       .finally(() => {
           __extNamePoolLoading = false;
@@ -2240,6 +2297,24 @@ function refreshExtensionAutocompletePool() {
               refreshExtensionAutocompletePool();
           }
       });
+}
+
+// v4.31: scan the current editor value for every `EXTENSION <name>`
+// reference (any of ˅ / ^ / bare) and return the union of FUNCTION names
+// the referenced extensions define, using the cached __extFunctionsByStem.
+// Used by handleAutocompleteInput to include only in-use extension callables.
+function _autocompleteFunctionsFromReferencedExtensions(fullText) {
+    const out = new Set();
+    if (!fullText) return out;
+    const re = /^\s*EXTENSION\s+([A-Za-z0-9_.\-]+)(?:\s+(?:\^|˅))?\s*$/gm;
+    let m;
+    while ((m = re.exec(fullText)) !== null) {
+        const key = m[1].toUpperCase();
+        const stem = key.replace(/\.(TXT|EXT|DSX|DD)$/i, '');
+        const arr = __extFunctionsByStem[key] || __extFunctionsByStem[stem];
+        if (arr) for (const fn of arr) out.add(fn);
+    }
+    return out;
 }
 // Prime the pool at first paint so the Script tab has it before the user
 // even opens the Extensions tab.
@@ -2308,10 +2383,17 @@ function handleAutocompleteInput(e) {
         if (fLM) currentFuncs.add(fLM[1]);
     });
 
+    // v4.31: also surface FUNCTION names from every EXTENSION the current
+    // script references (collapsed `˅` or bare form). Inline-expanded
+    // `^ ... END_EXTENSION` bodies are already picked up by currentFuncs
+    // above - adding them here is safe (duplicates are filtered downstream).
+    const extFuncs = _autocompleteFunctionsFromReferencedExtensions(text);
+
     const dynamicCommands = [
         ...Array.from(VALID_KEYWORDS),
         ...Array.from(currentVars),
-        ...Array.from(currentFuncs)
+        ...Array.from(currentFuncs),
+        ...Array.from(extFuncs)
     ];
 
     autocompleteSuggestions = dynamicCommands.filter(c => c.startsWith(word) && c !== word);
