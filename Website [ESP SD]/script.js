@@ -716,7 +716,31 @@ const VALID_KEYWORDS = new Set([
     'STRING_BASH', 'STRING_POWERSHELL', 'END_STRING', 'END_STRINGLN',
     'RELEASE', 'MASS_STORAGE_ON', 'MASS_STORAGE_OFF',
     'RANDOM_LETTER', 'RANDOM_LOWERCASE_LETTER', 'RANDOM_UPPERCASE_LETTER',
-    'THEN', 'CONTAINS', 'IN'
+    'THEN', 'CONTAINS', 'IN',
+    // v4.28: additional Hak5 3.0 commands used by the OS_DETECTION extension
+    'SAVE_HOST_KEYBOARD_LOCK_STATE', 'RESTORE_HOST_KEYBOARD_LOCK_STATE'
+]);
+
+// v4.28: Hak5 built-in $_ variables. These are seeded by the firmware at
+// every script start (see executeScript's variables[_OS] etc. seeds), so
+// the linter must treat them as always-declared - both as assignment
+// targets ($_OS = LINUX) and as usages ($_CAPSLOCK_ON inside an IF).
+// Without this the OS_DETECTION extension lights up 20+ false errors.
+const BUILTIN_VARIABLES = new Set([
+    '_OS',
+    '_CAPSLOCK_ON', '_NUMLOCK_ON', '_SCROLLLOCK_ON',
+    '_HOST_CONFIGURATION_REQUEST_COUNT',
+    '_RECEIVED_HOST_LOCK_LED_REPLY',
+    '_JITTER_MIN', '_JITTER_MAX', '_JITTER_ENABLED',
+    '_RANDOM_MIN', '_RANDOM_MAX',
+    // v4.29 bug-hunt HIGH #4: additional built-ins referenced (read-only)
+    // by the Hak5 corpus exfil helpers - the firmware seeds/reads these,
+    // scripts may inspect them without ever writing them, so a bare read
+    // no longer warns "trying to use variable ... doesn't exist".
+    '_EXFIL_MODE_ENABLED', '_EXFIL_LEDS_ENABLED',
+    '_RANDOM_INT', '_RANDOM_LETTER', '_RANDOM_LOWERCASE_LETTER',
+    '_RANDOM_UPPERCASE_LETTER', '_RANDOM_SPECIAL', '_RANDOM_CHAR',
+    '_RANDOM_NUMBER'
 ]);
 
 
@@ -830,6 +854,11 @@ function updateErrorLens() {
         // (which is real DuckyScript we DO want to lint) from a COLLAPSED
         // extension body (˅ marker, one line only, no body to skip).
         const opaqueLines = new Set();
+        // v4.30: track opaque-block OPENER indices too so the per-line
+        // validator can skip the `needsInput` check for `STRING` / `STRINGLN`
+        // when they open a block (Hak5 corpus SAVE_FILES uses `STRINGLN`
+        // alone on a line to open a multi-line body).
+        const opaqueOpeners = new Set();
         {
             let inStr = false, inRem = false, inExtInline = false;
             for (let i = 0; i < lines.length; i++) {
@@ -850,12 +879,20 @@ function updateErrorLens() {
                     // Inline-expanded extension body IS ducky - do NOT mark
                     // opaque. We only track inExtInline so that a nested
                     // STRING_BASH block starter inside the extension works.
-                    if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; continue; }
-                    if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; continue; }
+                    if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; opaqueOpeners.add(i); continue; }
+                    if (u === 'STRING' || u === 'STRINGLN') { inStr = true; opaqueOpeners.add(i); continue; }   // v4.30 bare-form
+                    if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; opaqueOpeners.add(i); continue; }
                     continue;
                 }
-                if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; continue; }
-                if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; continue; }
+                if (u === 'STRING_BASH' || u === 'STRING_POWERSHELL' || u.startsWith('STRING_BASH ') || u.startsWith('STRING_POWERSHELL ')) { inStr = true; opaqueOpeners.add(i); continue; }
+                // v4.30: bare `STRING` / `STRINGLN` with NO args opens a
+                // multi-line block terminated by END_STRING(LN) - Hak5
+                // corpus SAVE_FILES_IN_RUBBER_DUCKY_STORAGE_WINDOWS uses this
+                // form to embed foreach/`mv` PowerShell bodies. Treat the
+                // body as opaque so the linter doesn't flag `foreach` /
+                // `mv` / `}` as unknown commands.
+                if (u === 'STRING' || u === 'STRINGLN') { inStr = true; opaqueOpeners.add(i); continue; }
+                if (u === 'REM_BLOCK' || u.startsWith('REM_BLOCK ')) { inRem = true; opaqueOpeners.add(i); continue; }
                 if (u.startsWith('EXTENSION ') && t.endsWith('^')) { inExtInline = true; continue; }
             }
         }
@@ -890,15 +927,22 @@ function updateErrorLens() {
             'WAIT_FOR_EVENT', 'RUN_WHEN_WIFI', 'LOCALE'
         ];
 
-        // Pass 1: Collect definitions
-        lines.forEach((line) => {
+        // Pass 1: Collect definitions.
+        // v4.29 bug-hunt HIGH #6: every registration below MUST skip lines
+        // that are inside a STRING_BASH / STRING_POWERSHELL / REM_BLOCK
+        // opaque body (sample code inside a REM_BLOCK was polluting
+        // globalDeclaredVars and masking real "used before declared"
+        // warnings elsewhere in the script). Iterate with the index so we
+        // can consult opaqueLines.
+        lines.forEach((line, idx) => {
+            if (opaqueLines.has(idx)) return;
             const trimmed = line.trim();
             const upper = trimmed.toUpperCase();
-            
+
             // Standard VAR/FUNCTION
             const varDefMatch = trimmed.match(/^(VAR|VARIABLE)\s+([a-zA-Z0-9_]+)/i);
             if (varDefMatch) globalDeclaredVars.add(varDefMatch[2].toUpperCase());
-            
+
             const funcDefMatch = trimmed.match(/^(FUNCTION|DEF_)\s*([a-zA-Z0-9_]+)/i);
             if (funcDefMatch) globalDeclaredFunctions.add(funcDefMatch[2].toUpperCase());
 
@@ -909,7 +953,7 @@ function updateErrorLens() {
             // Label-style FunctionName(): (Image 3 support)
             const funcLabelMatch = upper.match(/^([A-Z0-9_]+)\(\):/);
             if (funcLabelMatch) globalDeclaredFunctions.add(funcLabelMatch[1]);
-            
+
             const varPrefixMatch = upper.match(/^(VAR_|VARIABLE_)([A-Z0-9_]*)\s*=/);
             if (varPrefixMatch) {
                 const name = (varPrefixMatch[1] + varPrefixMatch[2]).toUpperCase();
@@ -923,6 +967,13 @@ function updateErrorLens() {
                     globalDeclaredVars.add(name);
                 }
             }
+
+            // v4.28: Hak5 3.0 `$name = value` assignments auto-declare the
+            // variable. v4.29 CRITICAL #2: also `VAR $name = value`.
+            const dollarAssignMatch = trimmed.match(/^\$([a-zA-Z_][a-zA-Z0-9_]*)\s*=/);
+            if (dollarAssignMatch) globalDeclaredVars.add(dollarAssignMatch[1].toUpperCase());
+            const varDollarMatch = trimmed.match(/^(?:VAR|VARIABLE)\s+\$([a-zA-Z_][a-zA-Z0-9_]*)\s*=/i);
+            if (varDollarMatch) globalDeclaredVars.add(varDollarMatch[1].toUpperCase());
 
             const forLoopMatch = trimmed.match(/^FOR\s+\$([a-zA-Z0-9_]+)/i);
             if (forLoopMatch) globalDeclaredVars.add(forLoopMatch[1].toUpperCase());
@@ -982,7 +1033,19 @@ function updateErrorLens() {
                         }
                     }
                 } else if (upper.startsWith('VAR ') || upper.startsWith('VARIABLE ')) {
-                    errorMsg = makeError("Legacy 'VAR' command is disabled. Use 'VAR_name = value' instead.");
+                    // v4.29 bug-hunt CRITICAL #2: `VAR $name = value` IS the
+                    // canonical Hak5 3.0 dynamic-variable declaration and is
+                    // used across the corpus (translate.txt, self_destruct.txt,
+                    // linux_hid_exfil.txt). Only flag the truly-legacy form
+                    // (`VAR foo = ...` without the `$` prefix). The dollar form
+                    // is already registered in globalDeclaredVars by Pass 1's
+                    // dollarAssignMatch, so we just accept the line here.
+                    const rest = trimmed.substring(trimmed.indexOf(' ') + 1).trim();
+                    if (rest.startsWith('$')) {
+                        // Hak5 3.0 form: nothing to flag, Pass 1 handled the declaration.
+                    } else {
+                        errorMsg = makeError("Legacy 'VAR' command is disabled. Use 'VAR_name = value' (or the Hak5 3.0 'VAR $name = value' form) instead.");
+                    }
                 } else {
                     const assignMatch = trimmed.match(/^([a-zA-Z0-9_]+)\s*=/);
                     if (assignMatch) {
@@ -995,7 +1058,10 @@ function updateErrorLens() {
                     }
                 }
 
-                if (!errorMsg && needsInput.includes(cmd) && !argStr) {
+                if (!errorMsg && needsInput.includes(cmd) && !argStr && !opaqueOpeners.has(i)) {
+                    // v4.30: skip when this line is a block-opener (bare
+                    // STRING/STRINGLN/STRING_BASH/... that starts an opaque
+                    // body terminated by END_STRING(LN) / END_REM later).
                     errorMsg = makeError(`${cmd} requires parameters or input`);
                 }
 
@@ -1025,7 +1091,10 @@ function updateErrorLens() {
                             }
                         }
                         inFunction = false;
-                    } else if (upper === 'IF' || upper === 'IF:' || upper.startsWith('IF ') || upper.startsWith('IF_') || upper === 'RUN_ON_REBOOT' || upper === 'RUN_ON_REBOOT:' || upper.startsWith('RUN_ON_REBOOT ')) {
+                    } else if (upper === 'IF' || upper === 'IF:' || upper.startsWith('IF ') || upper.startsWith('IF(') || upper.startsWith('IF_') || upper === 'RUN_ON_REBOOT' || upper === 'RUN_ON_REBOOT:' || upper.startsWith('RUN_ON_REBOOT ')) {
+                        // v4.29 bug-hunt CRITICAL #1: also match `IF(` with no
+                        // space - Hak5 3.0 extensions write `IF($X != $Y) THEN`
+                        // (exfil_auto_eof_detect.txt, translate.txt).
                         // v4.27 bug-hunt HIGH #3: IF_DEFINED_TRUE / IF_NOT_DEFINED_TRUE
                         // are Hak5 preprocessor directives, NOT runtime IF blocks
                         // (they resolve at define-time via END_IF_DEFINED, not
@@ -1046,7 +1115,12 @@ function updateErrorLens() {
                         } else {
                             ifCount--;
                             if (ifCount < 0) { errorMsg = makeError(`Found '${cmd}' without a matching block.`); ifCount = 0; }
-                            else if (upper !== 'ENDIF' && upper !== 'END_IF' && upper !== 'END_RUN_ON_REBOOT') {
+                            // v4.30: also accept the `END_IF()` / `ENDIF()` form
+                            // (translate.txt). Only complain about leftover text
+                            // when the whole line isn't just the terminator or the
+                            // terminator with a bare `()`.
+                            else if (upper !== 'ENDIF' && upper !== 'END_IF' && upper !== 'END_RUN_ON_REBOOT'
+                                     && upper !== 'ENDIF()' && upper !== 'END_IF()' && upper !== 'END_RUN_ON_REBOOT()') {
                                 const extra = trimmed.substring(cmd.length).trim();
                                 errorMsg = makeError(`${cmd} needs to be in a newline. You still have text: '${extra}'`);
                             }
@@ -1058,11 +1132,14 @@ function updateErrorLens() {
                             // no-op: preprocessor branch marker
                         } else if (ifCount <= 0) {
                             errorMsg = makeError("Found 'ELSE' without a matching 'IF' block.");
-                        } else if (upper !== 'ELSE' && !upper.startsWith('ELSE IF') && !upper.startsWith('ELIF')) {
+                        } else if (upper !== 'ELSE' && !upper.startsWith('ELSE IF') && !upper.startsWith('ELIF')
+                                   // v4.30: `ELSE (cond) THEN` is the shorthand
+                                   // ELIF the Hak5 corpus uses (ROLLING_POWERSHELL).
+                                   && !upper.startsWith('ELSE (') && !upper.startsWith('ELSE(')) {
                             const extra = trimmed.substring(cmd.length).trim();
                             errorMsg = makeError(`ELSE needs to be in a newline. You still have text: '${extra}'`);
                         }
-                    } else if (upper === 'FOR' || upper === 'FOR:' || upper.startsWith('FOR ')) {
+                    } else if (upper === 'FOR' || upper === 'FOR:' || upper.startsWith('FOR ') || upper.startsWith('FOR(')) {
                         forCount++;
                     } else if (upper.startsWith('ENDFOR') || upper.startsWith('END_FOR')) {
                         forCount--;
@@ -1071,7 +1148,10 @@ function updateErrorLens() {
                             const extra = trimmed.substring(cmd.length).trim();
                             errorMsg = makeError(`${cmd} needs to be in a newline. You still have text: '${extra}'`);
                         }
-                    } else if (upper === 'WHILE' || upper === 'WHILE:' || upper.startsWith('WHILE ')) {
+                    } else if (upper === 'WHILE' || upper === 'WHILE:' || upper.startsWith('WHILE ') || upper.startsWith('WHILE(')) {
+                        // v4.29 bug-hunt CRITICAL #1: `WHILE(($_FOO == FALSE))` -
+                        // Hak5 corpus writes this with no space (passive_detect_ready
+                        // .txt, passive_windows_detect.txt, linux_hid_exfil.txt).
                         whileCount++;
                     } else if (upper.startsWith('END_WHILE')) {
                         whileCount--;
@@ -1094,11 +1174,22 @@ function updateErrorLens() {
                             errorMsg = makeError(`END_REPEAT needs to be in a newline. You still have text: '${extra}'`);
                         }
                     } else if (cmd === 'DELAY' || cmd === 'DEFAULTDELAY' || cmd === 'DEFAULT_DELAY') {
+                        // v4.28: accept `DELAY $var`, `DELAY #DEFINE`,
+                        // `DELAY VAR_x` and bare identifiers as valid too -
+                        // the firmware resolves them via processVariables /
+                        // #DEFINE substitution before parsing the number.
+                        // Only flag when the argument is a LITERAL non-number.
+                        // v4.29 bug-hunt HIGH #8: also accept bare identifiers
+                        // (`DELAY DEFAULT_DELAY_VAR`) and `$` followed by any
+                        // subsequent ident char (Hak5 tolerates `$2ND_TRY`).
+                        const isVarRef = /^(\$[A-Za-z0-9_]+|#[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)$/i.test(argStr);
                         const val = parseInt(argStr);
-                        if (isNaN(val)) errorMsg = makeError(`${cmd} requires a number`);
-                        else if (val < 0) errorMsg = makeError(`${cmd} cannot be negative`);
-                        else if (val > 30000 && !ignoredWarnings.has(`${i}-DELAY_HIGH`)) errorMsg = makeWarning(`Delay is very long (${val}ms).`, 'DELAY_HIGH', i);
-                        else if (val < 20 && val > 0 && !ignoredWarnings.has(`${i}-DELAY_FAST`)) errorMsg = makeWarning(`Delay might be too fast for some HID interfaces.`, 'DELAY_FAST', i);
+                        if (!isVarRef) {
+                            if (isNaN(val)) errorMsg = makeError(`${cmd} requires a number`);
+                            else if (val < 0) errorMsg = makeError(`${cmd} cannot be negative`);
+                            else if (val > 30000 && !ignoredWarnings.has(`${i}-DELAY_HIGH`)) errorMsg = makeWarning(`Delay is very long (${val}ms).`, 'DELAY_HIGH', i);
+                            else if (val < 20 && val > 0 && !ignoredWarnings.has(`${i}-DELAY_FAST`)) errorMsg = makeWarning(`Delay might be too fast for some HID interfaces.`, 'DELAY_FAST', i);
+                        }
                     } else if (cmd === 'LED') {
                         const parts = argStr.split(/\s+/).filter(x => x.length > 0);
                         if (parts.length === 3) {
@@ -1109,22 +1200,75 @@ function updateErrorLens() {
                         }
                     } else if (cmd === 'SELFDESTRUCT') {
                         if (!ignoredWarnings.has(`${i}-DANGER`)) errorMsg = makeWarning(`Dangerous command: This will trigger a device event immediately.`, 'DANGER', i);
-                    } else if (trimmed.includes('=') && !upper.startsWith('IF') && !upper.startsWith('ELIF') && !upper.startsWith('FOR') && !upper.startsWith('WHILE')) {
+                    } else if (trimmed.includes('=') && !upper.startsWith('IF') && !upper.startsWith('ELIF') && !upper.startsWith('FOR') && !upper.startsWith('WHILE')
+                                                                                    // v4.30: don't parse STRING / STRINGLN / DEFINE args as
+                                                                                    // assignments - their bodies legitimately contain `=`
+                                                                                    // (`STRING cmd /c "FOR ... tokens=4"`, `DEFINE #X val`).
+                                                                                    && !upper.startsWith('STRING ') && !upper.startsWith('STRINGLN ')
+                                                                                    && !upper.startsWith('STRING_') && !upper.startsWith('DEFINE ')
+                                                                                    // v4.30: `VAR $name = value` is handled up in the VAR
+                                                                                    // branch (chain 1); don't double-fire on it here.
+                                                                                    && !upper.startsWith('VAR ') && !upper.startsWith('VARIABLE ')) {
                         const name = trimmed.split('=')[0].trim().toUpperCase();
                         const afterEquals = trimmed.split('=')[1].trim();
+                        // v4.28: $-prefixed names are Hak5 3.0 dynamic variables.
+                        // They can be assigned freely without a prior declaration
+                        // AND can be reassigned any number of times (`$_OS =
+                        // WINDOWS` then later `$_OS = LINUX` inside an ELSE arm
+                        // is normal). Skip both "used before declared" and
+                        // "already declared" checks for them, and register the
+                        // name (stripped $) as declared so later usages don't
+                        // warn.
+                        const isDollarVar = name.startsWith('$');
+                        // v4.29 bug-hunt HIGH #7: check the FIRST TOKEN of the
+                        // RHS, not the whole string. Previously `$foo =
+                        // END_FUNCTION suffix` slipped through because the
+                        // full RHS didn't match any STRUCTURAL_KEYWORDS entry,
+                        // and the dollar-branch then auto-registered FOO as
+                        // declared. Split on whitespace so the first token
+                        // gets checked in isolation.
+                        const afterHead = (afterEquals.split(/\s+/)[0] || '').toUpperCase()
+                                            .replace(/[;,)]+$/, '');   // strip trailing punctuation
                         if (!afterEquals && !ignoredWarnings.has(`${i}-${name}`)) {
-                            errorMsg = makeWarning(`Variable assignment is empty`, name, i);
-                        } else if (STRUCTURAL_KEYWORDS.has(afterEquals.toUpperCase())) {
-                            errorMsg = makeError(`Variable assignment cannot be a structural keyword: '${afterEquals}'`);
+                            // v4.30: Hak5 built-in `$_JITTER_MIN =` (empty) is a
+                            // deliberate reset (protected_storage_mode.txt).
+                            // Don't nag on those - they're intentional.
+                            const bareBuiltin = name.startsWith('$') && BUILTIN_VARIABLES.has(name.substring(1));
+                            if (!bareBuiltin) errorMsg = makeWarning(`Variable assignment is empty`, name, i);
+                        } else if (STRUCTURAL_KEYWORDS.has(afterHead)) {
+                            errorMsg = makeError(`Variable assignment cannot be a structural keyword: '${afterHead}'`);
+                        } else if (isDollarVar) {
+                            // Auto-declare and allow reassignment.
+                            globalDeclaredVars.add(name.substring(1));
                         } else if (processedVars.has(name)) {
                              errorMsg = makeError(`Variable '${name}' is already declared.`);
                         } else if (!globalDeclaredVars.has(name) && !VALID_KEYWORDS.has(name)) {
                             errorMsg = makeError(`Variable '${name}' is used before being declared.`);
                         }
-                        processedVars.add(name);
+                        if (!isDollarVar) processedVars.add(name);
                     } else if (trimmed.endsWith('()')) {
+                        // v4.30: DEFINE #NAME REVERT_TO_THUMBDRIVE() etc.
+                        // is a DEFINE whose value happens to end in `()`, not
+                        // a call. Also, several Hak5 3.0 built-ins are invoked
+                        // with the trailing `()` form (WAIT_FOR_EOF(),
+                        // SOFT_BRICK(), REVERT_TO_THUMBDRIVE(), END_IF()...);
+                        // treat them as valid built-in commands.
                         const fName = trimmed.replace('()', '').trim().toUpperCase();
-                        if (!globalDeclaredFunctions.has(fName)) errorMsg = makeError(`Call to undefined function: '${fName}()'`);
+                        const isDefineHead = upper.startsWith('DEFINE ');
+                        const builtinCall = new Set([
+                            'WAIT_FOR_EOF', 'SOFT_BRICK', 'REVERT_TO_THUMBDRIVE',
+                            'END_IF', 'ENDIF', 'END_FUNCTION', 'END_DEF',
+                            'STOP_PAYLOAD', 'HIDE_PAYLOAD', 'RESTORE_PAYLOAD',
+                            'SAVE_HOST_KEYBOARD_LOCK_STATE',
+                            'RESTORE_HOST_KEYBOARD_LOCK_STATE',
+                            'PERSIST', 'CONSUME', 'DISABLE_BUTTON',
+                            'DETECT_OS', 'GET_TIME', 'GET_DAY'
+                        ]);
+                        if (isDefineHead) {
+                            // no-op: DEFINE value; the DEFINE handler is elsewhere
+                        } else if (builtinCall.has(fName)) {
+                            // Recognised built-in - accept the `()` invocation form.
+                        } else if (!globalDeclaredFunctions.has(fName)) errorMsg = makeError(`Call to undefined function: '${fName}()'`);
                     } else {
                         // FALLBACK: Unknown command or variable check
                         // NOTE: SIZE_XX_UNIT (e.g. SIZE_22_GB) is a Hak5-compatible token
@@ -1136,8 +1280,24 @@ function updateErrorLens() {
                         const isPrefixCmd = /^(VID_|PID_|MAN_|PRODUCT_|HOLD_|HOLD_TILL_|SIZE_|HID_|LED_|BLINK_LED_|LOCALE_|RANDOM_|IF_|WAIT_FOR_|INJECT_)/.test(cmd);
                         const isKeyword = VALID_KEYWORDS.has(cmd);
                         const isDeclaredVar = globalDeclaredVars.has(cmd);
+                        // v4.29 bug-hunt HIGH #3: `#DEFINE`d macros can be
+                        // invoked as bare statements - the preprocessor
+                        // substitutes them before execution
+                        // (self_destruct.txt: `#DESTRUCT_METHOD`,
+                        // `#BOOT_ATTACKMODE`). Accept a `#IDENT` first word.
+                        const isDefineRef = /^#[A-Za-z_][A-Za-z0-9_]*$/.test(cmd);
+                        // v4.30: dash-separated modifier combos like
+                        // `CTRL-SHIFT`, `CTRL-ALT-DELETE`, `GUI-SHIFT-S` are
+                        // valid Hak5 3.0 combos (community_WINDOWS_ELEVATED_
+                        // EXECUTION.txt). Accept any token where every dash-
+                        // separated segment resolves to a known key/modifier.
+                        const isComboKey = cmd.includes('-') && cmd.split('-').every(seg => {
+                            if (!seg) return false;
+                            if (VALID_KEYWORDS.has(seg)) return true;
+                            return /^(CTRL|CONTROL|SHIFT|ALT|GUI|WINDOWS|META|COMMAND|CMD|OPTION|ALTGR|F([1-9]|1[0-2])|[A-Z0-9])$/.test(seg);
+                        });
 
-                        if (!isKeyword && !isDeclaredVar && !isPrefixCmd) {
+                        if (!isKeyword && !isDeclaredVar && !isPrefixCmd && !isDefineRef && !isComboKey) {
                             if (cmd.endsWith(':')) {
                                 const name = cmd.slice(0, -1);
                                 errorMsg = makeError(`Unknown command '${cmd}'. Did you mean 'FUNCTION ${name}'?`);
@@ -1158,14 +1318,35 @@ function updateErrorLens() {
                 }
             }
 
-                if (!errorMsg && ['STRING', 'STRINGLN', 'IF', 'ELIF', 'FOR'].includes(cmd)) {
+                // v4.29 bug-hunt HIGH #5: WHILE and REPEAT bodies were not
+                // scanned for "trying to use variable ... doesn't exist", so a
+                // typo like `$_CAPS_LOCK_ON` inside a WHILE conditional slipped
+                // through unnoticed. Include both here. Also normalize the
+                // no-space `IF(`/`WHILE(`/`FOR(` forms so their conditionals
+                // still get scanned.
+                const cmdBase = cmd.replace(/[(:].*/, '');
+                // v4.30: if the current line is a STRING/STRINGLN whose body
+                // clearly contains shell/PS content (semicolons, assignments,
+                // `foreach`, `Set-Variable`, `-band`), the `$VAR` refs in it
+                // are PowerShell/bash vars typed at the host, NOT DuckyScript
+                // vars - suppress the "trying to use variable" warning so we
+                // stop nagging on exfil payloads (windows/linux_hid_exfil,
+                // SAVE_FILES_IN_RUBBER_DUCKY_STORAGE_WINDOWS).
+                const looksLikeShell = (cmdBase === 'STRING' || cmdBase === 'STRINGLN') &&
+                    /(;|=|foreach\b|Set-Variable|ToCharArray|-band|-bor|\$\{|>>|\|\||&&)/i.test(argStr);
+                if (!errorMsg && !looksLikeShell && ['STRING', 'STRINGLN', 'IF', 'ELIF', 'FOR', 'WHILE', 'REPEAT'].includes(cmdBase)) {
                     const varMatches = trimmed.match(/(VAR_[a-zA-Z0-9_]*|VARIABLE_[a-zA-Z0-9_]*|\$[a-zA-Z0-9_]+)/gi);
                     if (varMatches) {
                         for (const m of varMatches) {
                             let v = m.toUpperCase();
                             // If it starts with $, strip it before checking if it was declared
                             if (v.startsWith('$')) v = v.substring(1);
-                            
+
+                            // v4.28: accept Hak5 built-in $_ vars ($_OS,
+                            // $_CAPSLOCK_ON etc.) as always-declared - the
+                            // firmware seeds them at every script start.
+                            if (BUILTIN_VARIABLES.has(v)) continue;
+
                             if (!globalDeclaredVars.has(v) && !ignoredWarnings.has(`${i}-${v}`)) {
                                 errorMsg = makeWarning(`Trying to use variable '${v}'? It doesn't exist.`, v, i);
                                 break;

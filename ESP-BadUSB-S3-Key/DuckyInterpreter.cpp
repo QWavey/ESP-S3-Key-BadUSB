@@ -9,6 +9,8 @@
 #include "AttackMode.h"
 #include "MSCManager.h"      // v4.9: mscFindFreeSpaceAfterLastPartition + sub-region API
 #include <USB.h>
+#include "esp32-hal-tinyusb.h"   // v4.29: tud_mounted() for the real
+                                  //        WAIT_FOR_EVENT USB_CONNECTED wait
 
 struct LoopState {
   int startLine;
@@ -1424,8 +1426,28 @@ void executeCommand(String line) {
     else if (line == "LED_P") setLED(128, 0, 128);
     else if (line == "LED_C") setLED(0, 255, 255);
     else if (line == "LED_M") setLED(255, 0, 255);
-    else if (line == "LED_IR") Serial.println("IR LED Not Hardware Supported (Stub)");
-    else if (line == "LED_UV") Serial.println("UV LED Not Hardware Supported (Stub)");
+    // v4.29 real impl (was serial-only stub): this hardware has no IR or UV
+    // emitter, but a silent no-op leaves the user wondering whether the
+    // command even ran. Give a distinctive visible acknowledgement on the
+    // blue LED (2x fast triple-blink for IR, 3x fast triple-blink for UV)
+    // AND surface it through the same lastError / errorCount channel every
+    // other unavailable-hardware command uses, so the dashboard shows a
+    // proper warning instead of a phantom success.
+    else if (line == "LED_IR" || line == "LED_UV") {
+      const uint8_t bursts = (line == "LED_IR") ? 2 : 3;
+      for (uint8_t b = 0; b < bursts; b++) {
+        for (uint8_t k = 0; k < 3; k++) {
+          setLED(0, 0, 255); delay(40);
+          setLED(0, 0, 0);   delay(40);
+        }
+        delay(180);
+      }
+      const char* which = (line == "LED_IR") ? "IR" : "UV";
+      Serial.print("["); Serial.print(which); Serial.println("] No emitter on this hardware - visible-LED acknowledgement instead");
+      lastError = String(which) + " emitter not present on this board - visible-LED ack only";
+      errorCount++;
+      logCommand(line.c_str(), lastError);
+    }
     else if (line == "LED_A") setLED(255, 127, 0); // Amber
     else if (line == "LED_V") setLED(148, 0, 211); // Violet
     else if (line == "LED_OFF") {
@@ -1882,10 +1904,50 @@ void executeCommand(String line) {
 
   if (line.startsWith("WAIT_FOR_EVENT = ")) {
     String event = line.substring(17); event.trim();
-    if (event == "USB_CONNECTED") {
-      while (!USB && !stopRequested) delay(500);
-    } else if (event == "USB_DISCONNECTED") {
-      while (USB && !stopRequested) delay(500);
+    // v4.29 real impl (was uppercase-only, no timeout, no cooperative pumps):
+    //   * accept a few event aliases (Hak5 corpus uses variants)
+    //   * use tud_mounted() for the ground-truth USB-enumerated signal
+    //     (the `USB` object may still exist while the host is gone)
+    //   * cap at 300s so a never-arriving event doesn't wedge the payload
+    //   * pump the shared cooperative loops so factory-reset + LED + web
+    //     server stay responsive during the wait
+    event.toUpperCase();
+    const unsigned long WAIT_CEILING_MS = 300000UL;
+    unsigned long waitStart = millis();
+    auto pumpAll = [](){
+      extern void pumpButton(); pumpButton();
+      handleLED(); server.handleClient(); comShellLoop();
+      extern void hostLedTick(); hostLedTick();
+    };
+    if (event == "USB_CONNECTED" || event == "USB_MOUNTED" || event == "USB_ATTACHED") {
+      while (!tud_mounted() && !stopRequested && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(20);
+      }
+    } else if (event == "USB_DISCONNECTED" || event == "USB_UNMOUNTED" || event == "USB_DETACHED") {
+      while (tud_mounted() && !stopRequested && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(20);
+      }
+    } else if (event == "WIFI_CONNECTED") {
+      while (WiFi.status() != WL_CONNECTED && !stopRequested && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(50);
+      }
+    } else if (event == "WIFI_DISCONNECTED") {
+      while (WiFi.status() == WL_CONNECTED && !stopRequested && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(50);
+      }
+    } else if (event == "CLIENT_CONNECTED") {
+      while (WiFi.softAPgetStationNum() == 0 && !stopRequested && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(50);
+      }
+    } else if (event == "CLIENT_DISCONNECTED") {
+      unsigned int at = WiFi.softAPgetStationNum();
+      while (WiFi.softAPgetStationNum() >= at && !stopRequested && at > 0 && (millis() - waitStart) < WAIT_CEILING_MS) {
+        pumpAll(); delay(50);
+      }
+    } else {
+      lastError = "WAIT_FOR_EVENT: unknown event '" + event + "'";
+      errorCount++;
+      Serial.println("[WAIT_FOR_EVENT] " + lastError);
     }
     return;
   }
@@ -1963,21 +2025,54 @@ void executeCommand(String line) {
      return;
   }
 
-  if (line.startsWith("WAIT_FOR_EVENT = ")) {
-    String event = line.substring(17);
-    event.trim();
-    // Blocking wait for event
-    unsigned long start = millis();
-    while (millis() - start < 30000) { // 30s timeout
-      if (event == "USB_CONNECTED") break; // Stub for now
-      if (event == "WIFI_CONNECTED" && WiFi.status() == WL_CONNECTED) break;
-      delay(100);
-    }
-    return;
-  }
+  // v4.29: the second WAIT_FOR_EVENT handler that used to live here was a
+  // dead-code stub - the earlier `startsWith("WAIT_FOR_EVENT = ")` branch
+  // (around line 1883) matches first with a real tud_mounted()-based wait,
+  // and even if it didn't, the stub broke out of its own loop instantly on
+  // USB_CONNECTED. Removed; the working handler above is the only one.
 
   if (line.startsWith("PING ")) {
-    variables["LAST_PING_SUCCESS"] = (WiFi.status() == WL_CONNECTED) ? "true" : "false";
+    // v4.29 real impl (was: just report WiFi.status() and ignore the host).
+    // Do a real reachability check: parse the arg as `host[:port]`, resolve
+    // via DNS if needed, TCP-connect with a short timeout, close cleanly.
+    // Publishes LAST_PING_SUCCESS (true/false) + LAST_PING_MS (round-trip
+    // in ms) so payloads can `IF LAST_PING_SUCCESS == "true"` or gate on
+    // latency. No external Ping/ICMP dependency - a TCP connect proves
+    // both link-layer AND that a real host answered, which is what payloads
+    // actually care about ("is the target reachable?").
+    String arg = line.substring(5); arg.trim();
+    String host = arg;
+    uint16_t port = 80;
+    int colon = arg.indexOf(':');
+    if (colon > 0) {
+      host = arg.substring(0, colon);
+      port = (uint16_t) arg.substring(colon + 1).toInt();
+      if (port == 0) port = 80;
+    }
+    // Strip a scheme prefix if the user wrote a full URL by mistake.
+    if (host.startsWith("http://"))  host = host.substring(7);
+    if (host.startsWith("https://")) { host = host.substring(8); if (colon <= 0) port = 443; }
+    int slash = host.indexOf('/');
+    if (slash >= 0) host = host.substring(0, slash);
+
+    bool ok = false;
+    unsigned long rttMs = 0;
+    if (WiFi.status() != WL_CONNECTED) {
+      lastError = "PING: WiFi not connected";
+      errorCount++;
+      Serial.println("[PING] " + lastError);
+    } else {
+      WiFiClient c;
+      c.setTimeout(2);          // seconds; caps the connect attempt
+      unsigned long t0 = millis();
+      ok = c.connect(host.c_str(), port);
+      rttMs = millis() - t0;
+      if (ok) c.stop();
+      Serial.printf("[PING] %s:%u -> %s (%lu ms)\n", host.c_str(), (unsigned)port, ok ? "ok" : "fail", (unsigned long)rttMs);
+    }
+    variables["LAST_PING_SUCCESS"] = ok ? "true" : "false";
+    variables["LAST_PING_MS"]      = String(rttMs);
+    variables["LAST_PING_HOST"]    = host;
     return;
   }
 
