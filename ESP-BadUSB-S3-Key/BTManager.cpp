@@ -110,13 +110,22 @@ void stopBT() {
 }
 
 void scanBT() {
+    // v4.4: null-guard. pBLEScan is only set after setupBT() runs; callers
+    // (Ducky IF_BT_PRESENT, processAutomation with bluetoothToggleEnabled=false)
+    // could reach scanBT before setupBT and crash on the null deref.
+    if (!bluetoothToggleEnabled || !pBLEScan) {
+        Serial.println("[BT] scanBT: BT not initialised — skipped");
+        return;
+    }
     foundBTDevices.clear();
     Serial.println("Scanning for BT devices...");
     btScanning = true;
     BLEScanResults* foundDevices = pBLEScan->start(5, false);
     btScanning = false;
-    Serial.print("BT Devices found: ");
-    Serial.println(foundDevices->getCount());
+    if (foundDevices) {
+        Serial.print("BT Devices found: ");
+        Serial.println(foundDevices->getCount());
+    }
     pBLEScan->clearResults();
 }
 

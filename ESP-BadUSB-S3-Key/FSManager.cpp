@@ -4,6 +4,7 @@
 #include "LEDManager.h"
 #include "LogManager.h"
 #include <ArduinoJson.h>
+#include "esp32-hal-tinyusb.h"    // tud_ready() for the MSC-safe SD check (v4.4)
 
 bool initSDCard() {
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
@@ -58,17 +59,47 @@ bool initSDCard() {
 void checkSDCard() {
   bool cardDetected = false;
 
-  // Improved SD card detection with multiple attempts
-  for (int i = 0; i < 3; i++) {
-    File testFile = SD.open("/.sdtest", FILE_WRITE);
-    if (testFile) {
-      testFile.print("test");
-      testFile.close();
-      SD.remove("/.sdtest");
-      cardDetected = true;
-      break;
+  // v4.4 rewrite: the old code wrote and removed `/.sdtest` on every tick.
+  // That's 3-4 SPI transactions PER SECOND, wearing the card and racing the
+  // MSC callbacks (which do raw sector reads/writes from another task).
+  //
+  // Priorities now:
+  //   1) If a host has mounted the USB drive (tud_ready), NEVER poke the FAT
+  //      layer — a filesystem-level op while MSC is mid-transfer corrupts FAT
+  //      metadata. Trust the last known state and defer.
+  //   2) Fast, no-I/O detection via SD.cardType() — reads a cached SDMMC/SPI
+  //      register. Only fall back to a write-probe once every 30 seconds, or
+  //      when cardType() is inconclusive.
+  static uint32_t lastWriteProbe = 0;
+  const uint32_t kProbeIntervalMs = 30000;
+
+  if (tud_ready()) {
+    // Host is actively using the drive — don't touch it.
+    return;
+  }
+
+  // Cheap path: card type register.
+  uint8_t ct = SD.cardType();
+  if (ct != CARD_NONE && ct != CARD_UNKNOWN) {
+    cardDetected = true;
+  } else if (millis() - lastWriteProbe > kProbeIntervalMs) {
+    lastWriteProbe = millis();
+    // Only reach this when cardType() reports NONE/UNKNOWN — try a real write
+    // probe up to 3 times, matching the pre-v4.4 behaviour.
+    for (int i = 0; i < 3; i++) {
+      File testFile = SD.open("/.sdtest", FILE_WRITE);
+      if (testFile) {
+        testFile.print("t");
+        testFile.close();
+        SD.remove("/.sdtest");
+        cardDetected = true;
+        break;
+      }
+      delay(10);
     }
-    delay(10);
+  } else {
+    // Recently probed with a NONE result — trust the last known state.
+    cardDetected = sdCardPresent;
   }
 
   if (cardDetected && !sdCardPresent) {
@@ -514,13 +545,26 @@ bool copySDFile(String sourcePath, String destPath) {
 
   uint8_t buffer[512];
   size_t bytesRead;
+  bool writeFailed = false;
   while ((bytesRead = sourceFile.read(buffer, sizeof(buffer))) > 0) {
-    destFile.write(buffer, bytesRead);
+    // v4.4: check destFile.write's return value — SD.write returns the number
+    // of bytes actually written; when the card is full or write-protected it
+    // returns 0 or a short count. Without this check, moveSDFile deletes the
+    // source after a "successful" 0-byte copy → DATA LOSS.
+    if (destFile.write(buffer, bytesRead) != bytesRead) {
+      Serial.println("[FS] copy: write failed (card full or write-protected?): " + destPath);
+      writeFailed = true;
+      break;
+    }
   }
 
   sourceFile.close();
   destFile.close();
 
+  if (writeFailed) {
+    SD.remove(destPath);   // don't leave a torn/partial file behind
+    return false;
+  }
   return true;
 }
 
@@ -529,7 +573,12 @@ bool moveSDFile(String sourcePath, String destPath) {
     if (SD.remove(sourcePath)) {
       return true;
     } else {
-      Serial.println("Failed to remove source file after copy: " + sourcePath);
+      // v4.11 FIX: if the source remove fails we now roll back the copy so
+      // callers (cutFile / pasteFile) don't end up with two copies AND a
+      // "Failed to move" error. Better to fail cleanly.
+      Serial.println("Failed to remove source file after copy: " + sourcePath +
+                     " - rolling back destination");
+      SD.remove(destPath);
       return false;
     }
   }
@@ -550,7 +599,18 @@ bool deleteDirectory(String path) {
   dir.rewindDirectory();
   File file = dir.openNextFile();
   while (file) {
-    String filepath = path + "/" + String(file.name());
+    // v4.4: ESP32 SD library's file.name() returns the FULL absolute path
+    // (e.g. "/scripts/foo.txt"), not just the leaf. The old code did
+    //   filepath = path + "/" + file.name()
+    // which produced "/scripts//scripts/foo.txt" — SD.remove failed and the
+    // whole tree walk aborted, leaving handleDeleteFile with a 500. Strip
+    // everything up to and including the last '/' from file.name() first.
+    String fname = String(file.name());
+    int lastSlash = fname.lastIndexOf('/');
+    if (lastSlash >= 0) fname = fname.substring(lastSlash + 1);
+    String filepath = path;
+    if (!filepath.endsWith("/")) filepath += "/";
+    filepath += fname;
     if (file.isDirectory()) {
       if (!deleteDirectory(filepath)) {
         dir.close();
@@ -588,7 +648,12 @@ bool downloadFileFromURL(String url, String path) {
   
   int httpCode = http.GET();
 
-  if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == HTTP_CODE_FOUND) {
+  // v4.17-post-hunt BUG #6 fix: don't treat 301/302 as success. The old code
+  // saved the redirect body (usually an HTML "Moved" page) as if it was the
+  // downloaded file. HTTPC_STRICT_FOLLOW_REDIRECTS should handle real
+  // redirects internally; anything reaching us as a bare 301/302 means the
+  // redirect wasn't followed and we must NOT persist that HTML.
+  if (httpCode == HTTP_CODE_OK) {
     int len = http.getSize();
     WiFiClient * stream = http.getStreamPtr();
 
@@ -600,12 +665,24 @@ bool downloadFileFromURL(String url, String path) {
     }
 
     uint8_t buff[512] = { 0 };
+    // v4.4: idle timeout. http.setTimeout(10000) above only covers the request
+    // stage — once we're streaming, stream->available() can return 0 forever
+    // if the peer stalls without closing, hanging the DuckyScript task and the
+    // whole loop() thread indefinitely. Break out after 15 s of no bytes.
+    unsigned long lastDataMs = millis();
+    const unsigned long IDLE_TIMEOUT_MS = 15000;
     while (http.connected() && (len > 0 || len == -1)) {
       size_t size = stream->available();
       if (size) {
         int c = stream->readBytes(buff, ((size > sizeof(buff)) ? sizeof(buff) : size));
-        file.write(buff, c);
-        if (len > 0) len -= c;
+        if (c > 0) {
+          file.write(buff, c);
+          if (len > 0) len -= c;
+          lastDataMs = millis();
+        }
+      } else if (millis() - lastDataMs > IDLE_TIMEOUT_MS) {
+        Serial.println("[HTTP] download idle timeout — aborting");
+        break;
       }
       delay(1);
     }

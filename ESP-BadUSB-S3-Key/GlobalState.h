@@ -40,6 +40,10 @@ extern bool updatePackageReady;   // upload finished, apply on next loop
 extern int  updateProgress;       // 0-100 across the whole apply
 extern String updateStatus;       // human-readable status line
 extern bool updateApplying;       // true while applyEspkg() runs
+// v4.4: /execute defers reboot-inducing scripts to loop() so the HTTP 200
+// response has a chance to flush before the ESP restarts.
+extern String pendingScript;
+extern bool   pendingScriptReady;
 extern int buttonPin;
 extern bool buttonState;
 

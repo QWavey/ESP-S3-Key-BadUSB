@@ -20,6 +20,9 @@ bool updatePackageReady = false;
 int  updateProgress = 0;
 String updateStatus = "";
 bool updateApplying = false;
+// v4.4: deferred /execute handoff. See /execute handler + loop() dispatch.
+String pendingScript = "";
+bool   pendingScriptReady = false;
 int buttonPin = 0;
 bool buttonState = false;
 
@@ -31,6 +34,10 @@ String currentLanguage = "us";
 int defaultDelay = 0;
 int delayBetweenKeys = 0;
 std::map<String, String> variables;
+// v4.23 (bug-hunt HIGH #2): script-scoped BUTTON_DEF flag. Reset at each
+// executeScript() entry so a stopped script's leftover BUTTON_DEF doesn't
+// swallow the next script's lines.
+bool g_buttonDefActive = false;
 String lastCommand = "";
 bool scriptRunning = false;
 bool stopRequested = false;

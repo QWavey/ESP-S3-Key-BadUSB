@@ -1,5 +1,6 @@
 #include "UpdateManager.h"
 #include "FSManager.h"
+#include "LEDManager.h"
 #include <SD.h>
 #include <Update.h>
 #include <ArduinoJson.h>
@@ -10,16 +11,34 @@ static File g_pkgUploadFile;
 void handleUpdatePackageUpload() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
+    // Guard against a concurrent second upload trying to reset state mid-apply.
+    if (updateApplying) {
+      updateStatus = "Rejected: another update is already being applied";
+      return;
+    }
+    // Refuse if a DuckyScript is running — MSC/SD collision + partial write risk.
+    if (scriptRunning) {
+      updateStatus = "Rejected: script is running — stop it first";
+      return;
+    }
     updateApplying = false;
     updateProgress = 0;
     updateStatus = "Receiving package...";
     if (SD.exists(ESPKG_TMP_PATH)) SD.remove(ESPKG_TMP_PATH);
     g_pkgUploadFile = SD.open(ESPKG_TMP_PATH, FILE_WRITE);
+    // v4.4: if SD is full/write-protected the open silently fails and every
+    // subsequent chunk is dropped, leaving updateStatus stuck on
+    // "Package received" while nothing was actually stored.
+    if (!g_pkgUploadFile) {
+      updateStatus = "Error: cannot open package temp file on SD";
+      Serial.println("[UPDATE] SD.open(ESPKG_TMP_PATH, WRITE) failed");
+    }
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (g_pkgUploadFile) g_pkgUploadFile.write(up.buf, up.currentSize);
   } else if (up.status == UPLOAD_FILE_END) {
     if (g_pkgUploadFile) g_pkgUploadFile.close();
-    updateStatus = "Package received";
+    // Only mark "received" if the temp file was actually opened & written.
+    if (SD.exists(ESPKG_TMP_PATH)) updateStatus = "Package received";
   }
 }
 
@@ -29,10 +48,36 @@ void handleUpdatePackagePost() {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"no package received\"}");
     return;
   }
+  // Sanity-check the uploaded blob BEFORE arming the apply: verify magic and
+  // that it's at least large enough to hold the header + a plausible manifest.
+  File pkg = SD.open(ESPKG_TMP_PATH, FILE_READ);
+  if (!pkg) {
+    server.send(500, "application/json", "{\"ok\":false,\"error\":\"cannot reopen package\"}");
+    return;
+  }
+  uint8_t hdr[10];
+  size_t hdrRead = pkg.read(hdr, 10);
+  size_t pkgSize = pkg.size();
+  pkg.close();
+  if (hdrRead != 10 ||
+      hdr[0]!='E' || hdr[1]!='S' || hdr[2]!='P' ||
+      hdr[3]!='K' || hdr[4]!='G' || hdr[5]!=0x01) {
+    SD.remove(ESPKG_TMP_PATH);
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"not a valid .espkg (bad magic)\"}");
+    return;
+  }
+  uint32_t manLen = (uint32_t)hdr[6] | ((uint32_t)hdr[7]<<8) |
+                    ((uint32_t)hdr[8]<<16) | ((uint32_t)hdr[9]<<24);
+  if (manLen == 0 || manLen > 8192 || pkgSize < (size_t)(10 + manLen)) {
+    SD.remove(ESPKG_TMP_PATH);
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"package truncated or manifest length invalid\"}");
+    return;
+  }
+
   updatePackageReady = true;   // applied on the next loop() so progress is pollable
   updateStatus = "Queued";
   updateProgress = 0;
-  server.send(200, "application/json", "{\"ok\":true,\"status\":\"applying\"}");
+  server.send(200, "application/json", "{\"ok\":true,\"status\":\"applying\",\"packageBytes\":" + String((unsigned long)pkgSize) + "}");
 }
 
 // ---- GET /api/update-status ------------------------------------------------
@@ -55,7 +100,9 @@ static bool extractFile(File& src, const String& path, uint32_t len,
   if (SD.exists(tmp)) SD.remove(tmp);
   File dst = SD.open(tmp, FILE_WRITE);
   if (!dst) return false;
-  uint8_t buf[512];
+  // v4.16 perf: 4 KB buffer (was 512 B) - cuts SPI round-trips 8x on
+  // ~200 KB web assets. `static` keeps it off the small helper's stack.
+  static uint8_t buf[4096];
   uint32_t remaining = len;
   while (remaining > 0) {
     size_t chunk = remaining > sizeof(buf) ? sizeof(buf) : remaining;
@@ -65,7 +112,10 @@ static bool extractFile(File& src, const String& path, uint32_t len,
     remaining -= r;
     doneBytes += r;
     updateProgress = (int)((uint64_t)doneBytes * 100ULL / (totalBytes ? totalBytes : 1));
-    server.handleClient();   // keep the UI progress poll responsive
+    // v4.11: removed server.handleClient() call here to prevent reentrancy
+    // during the SD extract phase (BUG-9). The progress poll will just see
+    // a slightly stale value until the next iteration - much better than
+    // corrupting the extract with a concurrent mutating handler.
   }
   dst.close();
   // atomically swap into place
@@ -81,35 +131,37 @@ void processPendingUpdate() {
   updateApplying = true;
   updateProgress = 0;
   updateStatus = "Opening package...";
+  setLEDMode(6);   // fast-blink BLUE while the update is being applied
+                    // (mode 1 was actually green; users reported it looked wrong)
 
   File pkg = SD.open(ESPKG_TMP_PATH, FILE_READ);
-  if (!pkg) { updateStatus = "Error: cannot open package"; updateApplying = false; return; }
+  if (!pkg) { updateStatus = "Error: cannot open package"; setLEDMode(4); updateApplying = false; return; }
 
   // magic: 'E','S','P','K','G',0x01
   uint8_t magic[6];
   if (pkg.read(magic, 6) != 6 || magic[0] != 'E' || magic[1] != 'S' || magic[2] != 'P' ||
       magic[3] != 'K' || magic[4] != 'G' || magic[5] != 0x01) {
-    updateStatus = "Error: not a valid .espkg"; pkg.close(); updateApplying = false; return;
+    updateStatus = "Error: not a valid .espkg"; setLEDMode(4); pkg.close(); updateApplying = false; return;
   }
 
   // manifest length (uint32 little-endian)
   uint8_t lenb[4];
-  if (pkg.read(lenb, 4) != 4) { updateStatus = "Error: truncated header"; pkg.close(); updateApplying = false; return; }
+  if (pkg.read(lenb, 4) != 4) { updateStatus = "Error: truncated header"; setLEDMode(4); pkg.close(); updateApplying = false; return; }
   uint32_t manLen = (uint32_t)lenb[0] | ((uint32_t)lenb[1] << 8) |
                     ((uint32_t)lenb[2] << 16) | ((uint32_t)lenb[3] << 24);
-  if (manLen == 0 || manLen > 8192) { updateStatus = "Error: bad manifest size"; pkg.close(); updateApplying = false; return; }
+  if (manLen == 0 || manLen > 8192) { updateStatus = "Error: bad manifest size"; setLEDMode(4); pkg.close(); updateApplying = false; return; }
 
   // manifest JSON (heap — never put multi-KB on the 8KB loop stack)
   char* manBuf = (char*)malloc(manLen + 1);
-  if (!manBuf) { updateStatus = "Error: out of memory"; pkg.close(); updateApplying = false; return; }
+  if (!manBuf) { updateStatus = "Error: out of memory"; setLEDMode(4); pkg.close(); updateApplying = false; return; }
   if (pkg.read((uint8_t*)manBuf, manLen) != (int)manLen) {
-    updateStatus = "Error: truncated manifest"; free(manBuf); pkg.close(); updateApplying = false; return;
+    updateStatus = "Error: truncated manifest"; setLEDMode(4); free(manBuf); pkg.close(); updateApplying = false; return;
   }
   manBuf[manLen] = 0;
   DynamicJsonDocument man(8192);
   DeserializationError jerr = deserializeJson(man, manBuf);
   free(manBuf);
-  if (jerr) { updateStatus = "Error: bad manifest JSON"; pkg.close(); updateApplying = false; return; }
+  if (jerr) { updateStatus = "Error: bad manifest JSON"; setLEDMode(4); pkg.close(); updateApplying = false; return; }
 
   // total bytes (for the progress bar)
   JsonArray sdArr = man["sd"].as<JsonArray>();
@@ -125,10 +177,28 @@ void processPendingUpdate() {
     String path = f["path"].as<String>();
     if (!path.startsWith("/")) path = "/" + path;
     uint32_t sz = f["size"] | 0;
+    // v4.11 SECURITY: reject `..` and quarantined system paths in the
+    // manifest. Without this, a crafted .espkg with `"path":"/reboot_script.txt"`
+    // overwrites files that the boot flow auto-executes -> persistent
+    // arbitrary code exec from anyone who can POST /api/update-package.
+    // Also block absolute-path escapes.
+    bool badPath = (path.indexOf("..") >= 0) ||
+                   (path == "/reboot_script.txt") ||
+                   (path == "/temp_resume.txt")   ||
+                   (path == "/update.espkg");
+    if (badPath) {
+      updateStatus = "Error: rejected unsafe manifest path " + path;
+      Serial.println("[UPDATE] " + updateStatus);
+      setLEDMode(4); pkg.close(); updateApplying = false; return;
+    }
     updateStatus = "Writing " + path;
-    server.handleClient();
+    // v4.11: DON'T call server.handleClient() here - reentrancy risk.
+    // Any concurrent /api/live-type / /api/save / /api/factory-reset that
+    // fires during the extract would corrupt the in-progress state. The
+    // status endpoint just sees a slightly stale progress until the next
+    // extract iteration; that's fine.
     if (!extractFile(pkg, path, sz, (uint32_t)totalBytes, doneBytes)) {
-      updateStatus = "Error writing " + path; pkg.close(); updateApplying = false; return;
+      updateStatus = "Error writing " + path; setLEDMode(4); pkg.close(); updateApplying = false; return;
     }
   }
 
@@ -138,23 +208,27 @@ void processPendingUpdate() {
     server.handleClient();
     if (!Update.begin(fwSize, U_FLASH)) {
       updateStatus = String("Error: OTA begin (") + Update.errorString() + ")";
-      pkg.close(); updateApplying = false; return;
+      setLEDMode(4); pkg.close(); updateApplying = false; return;
     }
     uint8_t buf[1024];
     uint32_t remaining = fwSize;
     while (remaining > 0) {
       size_t chunk = remaining > sizeof(buf) ? sizeof(buf) : remaining;
       int r = pkg.read(buf, chunk);
-      if (r <= 0) { updateStatus = "Error: truncated firmware"; Update.abort(); pkg.close(); updateApplying = false; return; }
-      if (Update.write(buf, r) != (size_t)r) { updateStatus = "Error: OTA write failed"; Update.abort(); pkg.close(); updateApplying = false; return; }
+      if (r <= 0) { updateStatus = "Error: truncated firmware"; setLEDMode(4); Update.abort(); pkg.close(); updateApplying = false; return; }
+      if (Update.write(buf, r) != (size_t)r) { updateStatus = "Error: OTA write failed"; setLEDMode(4); Update.abort(); pkg.close(); updateApplying = false; return; }
       remaining -= r;
       doneBytes += r;
       updateProgress = (int)((uint64_t)doneBytes * 100ULL / (totalBytes ? totalBytes : 1));
-      if ((remaining & 0x3FFF) == 0) server.handleClient();  // ~every 16 KB
+      // v4.4: removed the server.handleClient() call from inside the OTA
+      // write loop. Update.write() is NOT reentrant — if a concurrent /api/*
+      // handler fired here and (say) opened SD.open, the OTA partition could
+      // be left half-written and unbootable. The status endpoint just sees a
+      // stale progress value until the OTA loop yields; that's fine.
     }
     if (!Update.end(true)) {
       updateStatus = String("Error: OTA end (") + Update.errorString() + ")";
-      pkg.close(); updateApplying = false; return;
+      setLEDMode(4); pkg.close(); updateApplying = false; return;
     }
   }
 
@@ -163,6 +237,7 @@ void processPendingUpdate() {
   updateProgress = 100;
   updateStatus = fwSize > 0 ? "Done — rebooting..." : "Website updated";
   updateApplying = false;
+  setLED(0, 0, 255);          // solid blue: update finished successfully
   server.handleClient();   // flush the final status to any poller
   delay(800);
   if (fwSize > 0) ESP.restart();

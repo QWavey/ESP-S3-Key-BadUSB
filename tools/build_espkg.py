@@ -34,10 +34,66 @@ Examples:
 import argparse
 import json
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import zlib
 from datetime import datetime
+
+# Toolchain defaults — mirror the sketch's pinned build settings.
+DEFAULT_FQBN = ("esp32:esp32:esp32s3:USBMode=default,FlashSize=8M,"
+                "CDCOnBoot=default,UploadMode=default,"
+                "PartitionScheme=default_8MB,PSRAM=disabled")
+DEFAULT_SKETCH = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "ESP-BadUSB-S3-Key"))
+DEFAULT_BUILD_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "esp32-key-build")
+
+
+def _find_arduino_cli():
+    for p in [
+        shutil.which("arduino-cli"),
+        r"C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"),
+    ]:
+        if p and os.path.isfile(p):
+            return p
+    sys.exit("arduino-cli not found. Install Arduino IDE 2.x or arduino-cli.")
+
+
+def run_compile(sketch_dir, build_dir, fqbn, force_clean):
+    cli = _find_arduino_cli()
+    os.makedirs(build_dir, exist_ok=True)
+    if force_clean:
+        # Blow away any cached objects so the next compile is a full rebuild
+        # (--clean would work too, but on some CLI versions is finicky).
+        for name in os.listdir(build_dir):
+            p = os.path.join(build_dir, name)
+            (shutil.rmtree if os.path.isdir(p) else os.remove)(p)
+        print(f"[compile] cleared {build_dir}")
+    print(f"[compile] arduino-cli compile → {build_dir}")
+    r = subprocess.run(
+        [cli, "compile", "--fqbn", fqbn, "--output-dir", build_dir, sketch_dir],
+        check=False,
+    )
+    if r.returncode != 0:
+        sys.exit(f"[compile] arduino-cli exited {r.returncode}")
+    fw = os.path.join(build_dir, "ESP-BadUSB-S3-Key.ino.bin")
+    if not os.path.isfile(fw):
+        sys.exit(f"[compile] compile succeeded but firmware .bin not found at {fw}")
+    print(f"[compile] built {fw} ({os.path.getsize(fw):,} bytes)")
+    return fw
+
+
+def run_flash(build_dir, fqbn, port):
+    cli = _find_arduino_cli()
+    print(f"[flash] arduino-cli upload → {port}")
+    r = subprocess.run(
+        [cli, "upload", "--fqbn", fqbn, "--port", port, "--input-dir", build_dir],
+        check=False,
+    )
+    if r.returncode != 0:
+        sys.exit(f"[flash] arduino-cli exited {r.returncode}")
+    print(f"[flash] uploaded to {port}")
 
 MAGIC = b"ESPKG\x01"
 
@@ -125,7 +181,28 @@ def main():
     ap.add_argument("--version", "-v", default="dev", help="Package version string")
     ap.add_argument("--file", action="append", dest="extra_files",
                     help="Extra file mapping LOCAL:/sd/path (repeatable)")
+    ap.add_argument("--web-only", action="store_true",
+                    help="Explicitly build a website-only package (rejects --firmware).")
+    # arduino-cli integration -----------------------------------------------
+    ap.add_argument("--force-compile", action="store_true",
+                    help="Run arduino-cli compile (clean rebuild) before packaging; the "
+                         "resulting firmware.bin is used as --firmware.")
+    ap.add_argument("--flash-after-done", action="store_true",
+                    help="After packaging, run arduino-cli upload to flash the compiled "
+                         "firmware.bin directly to --port (NOT the .espkg).")
+    ap.add_argument("--sketch", default=DEFAULT_SKETCH,
+                    help="Sketch directory for --force-compile (default: ../ESP-BadUSB-S3-Key)")
+    ap.add_argument("--build-dir", default=DEFAULT_BUILD_DIR,
+                    help="Compile output directory (default: %(default)s)")
+    ap.add_argument("--fqbn", default=DEFAULT_FQBN, help="arduino-cli FQBN (default: pinned)")
+    ap.add_argument("--port", default="COM6", help="Serial port for --flash-after-done (default: COM6)")
     args = ap.parse_args()
+
+    if args.web_only and (args.firmware or args.force_compile):
+        sys.exit("--web-only can't be combined with --firmware / --force-compile.")
+
+    if args.force_compile:
+        args.firmware = run_compile(args.sketch, args.build_dir, args.fqbn, force_clean=True)
 
     if not os.path.isdir(args.web):
         sys.exit(f"Website dir not found: {args.web}")
@@ -133,6 +210,12 @@ def main():
         sys.exit(f"Firmware not found: {args.firmware}")
 
     build(args.web, args.firmware, args.out, args.version, args.extra_files)
+
+    if args.flash_after_done:
+        if not args.firmware:
+            print("[flash] no firmware to flash (web-only build); skipping.")
+        else:
+            run_flash(args.build_dir, args.fqbn, args.port)
 
 
 if __name__ == "__main__":

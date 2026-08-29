@@ -145,3 +145,129 @@ Requires a FAT32 microSD card inserted (firmware auto-creates
 `/languages`, `/scripts`, `/logs`, `/uploads` on first boot).
 
 Default AP: **ESP32-BadUSB** / `badusb123` → http://192.168.4.1
+
+## ATTACKMODE (Hak5-compatible)
+
+DuckyScript can reconfigure the USB composite device at runtime with the
+familiar `ATTACKMODE` command. Any order works.
+
+```
+REM Keyboard only
+ATTACKMODE HID VID_046D PID_C31C
+
+REM Keyboard + USB Mass Storage (STORAGE keeps HID by default — no lockout)
+ATTACKMODE HID STORAGE VID_046D PID_C31C
+ATTACKMODE STORAGE                       REM same thing (UX-friendly semantics)
+
+REM MSC only, no keyboard — must be explicit so a stray "STORAGE" doesn't
+REM lock you out of a device that only speaks HID
+ATTACKMODE STORAGE_ONLY
+
+REM Disable STORAGE only (keeps HID so device stays reachable)
+ATTACKMODE OFF
+```
+
+**Note on Hak5 divergence:** classic Hak5 `ATTACKMODE STORAGE` = "storage-only,
+no keyboard". This project defaults to keeping HID on when you say `STORAGE`
+because otherwise a typo silently locks you out of typing recovery scripts.
+Use the explicit `STORAGE_ONLY` / `NO_HID` keywords if you need the classic
+storage-only behaviour.
+
+Composition changes trigger a reboot so the USB descriptors can be rebuilt.
+VID/PID/SIZE-only changes on the current composition apply on next boot.
+
+### SIZE_XX_GB / _MB / _KB
+
+Tell the host the stick's reported capacity — either standalone or as an
+argument to `ATTACKMODE`:
+
+```
+SIZE_22_GB
+ATTACKMODE HID STORAGE
+```
+
+or
+
+```
+ATTACKMODE HID STORAGE SIZE_5000_KB
+```
+
+Requests larger than the physical SD card are clamped to the real size and an
+error is surfaced in the web UI's `lastError`.
+
+## HID stealth on demand
+
+DuckyScript can also present or hide the keyboard from the host mid-script:
+
+```
+HID_ATTACH
+STRING gets typed while the keyboard is attached
+HID_DETACH
+```
+
+If **Silent Startup** is enabled in Settings, the device presents no HID at
+boot (no Windows connect sound); the keyboard attaches only for the duration
+of a script or Live-typing session and detaches again afterwards.
+
+## Bundled `.espkg` updates (web + firmware in one file)
+
+Push a website update through Settings → **Firmware Update**:
+
+```
+python tools/build_espkg.py --web "Website [ESP SD]" --version 3.0-web -o web.espkg
+```
+
+Or build everything (compile firmware + package + flash it directly) in one shot:
+
+```
+python tools/build_espkg.py --force-compile --flash-after-done --port COM6 -o dist/full.espkg
+```
+
+The device's LED blinks blue while an `.espkg` is being applied and goes
+solid on success; on error it goes to the warning mode (fast blink).
+
+## Captive portal
+
+Joining the AP pops the OS-native captive-portal browser straight to the
+dashboard (Windows / Android / macOS / iOS all supported). No need to type
+`192.168.4.1` manually.
+
+## True Silent Startup (no chime, no device, no nothing)
+
+With **Silent Startup ON**, this firmware achieves what most ESP32-S3 stealth
+attempts can't:
+
+- ✅ **No entry in Windows Device Manager** — no keyboard, no drive, no JTAG.
+- ✅ **No Windows "device connected" chime** on a clean replug.
+- ✅ **No "disconnect" chime either** — Windows never fully enumerated anything.
+- ✅ **HID and MSC still attach on demand** — a script, Live typing, or an
+  ATTACKMODE change kicks `ensureHidReady()`, which reverses the silent state
+  and brings up the composite device instantly.
+
+### How it works (three layers, no eFuse, no hardware mod)
+
+1. **C++ constructor at `.init_array` priority 101** (defined in
+   `USBManager.cpp`) runs during the C runtime static-init pass, *before*
+   `main()` and `setup()`. It sets `USB_SERIAL_JTAG.conf0.pad_pull_override=1`
+   with all D+/D- pull-up bits at 0 — the electrical signal that tells any USB
+   host "there is no device here." This is the earliest hook Arduino/ESP-IDF
+   exposes to user code.
+2. **Setup Step 0** (very first block in `setup()`) reads the persisted
+   `silent_boot` NVS pref and re-asserts the same pull-up override — belt and
+   suspenders in case something between the constructor and setup wobbled it.
+3. **`silentRestorePadsForUsb()`** clears the override only when the boot is
+   *not* silent, or when `ensureHidReady()` is later asked to bring HID online.
+   The USB PHY pads themselves are **never** disabled — that experiment broke
+   `tud_hid_ready` after enumeration ("attaches but doesn't type"). Only the
+   pull-up-override bit is toggled.
+
+### What can't be done in pure software
+
+The ESP32-S3 ROM asserts D+ pull-up at ~1 ms after power. No user code can
+run before that. The ROM's brief D+ pulse is what would normally trigger
+Windows' PnP subsystem to schedule a connect event — but the constructor kills
+it fast enough that Windows never completes enumeration, so nothing is added
+to Device Manager and (on this hardware) no chime plays for the aborted
+attach. If a future OS behaves differently and does chime on a nanosecond
+D+ pulse, the only two remaining options are permanent (`DIS_USB_JTAG` eFuse
+burn) or hardware (an external USB switch IC like the O.MG cable uses).

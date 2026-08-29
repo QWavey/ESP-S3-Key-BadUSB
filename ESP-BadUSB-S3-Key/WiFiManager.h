@@ -7,6 +7,7 @@
 
 void setupAP();
 void stopAP();
+void loopCaptivePortal();   // call in main loop() to service captive DNS
 void scanWiFi();
 void startWiFiScan();
 void pollWiFiScan();

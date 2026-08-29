@@ -2,6 +2,13 @@
 #include "LogManager.h"
 #include "BTManager.h"
 #include <HTTPClient.h>
+#include <DNSServer.h>
+#include <esp_wifi.h>   // v4.12: esp_wifi_set_mac for Randomize-MAC on STA join
+
+// Captive portal DNS: answer every query with the AP's own IP so joining
+// clients (Windows/Android/iOS/macOS) auto-open the dashboard.
+static DNSServer captiveDNS;
+static bool      captivePortalUp = false;
 
 // ============================================================
 // AP Management
@@ -11,22 +18,44 @@ void setupAP() {
   WiFi.mode(WIFI_AP_STA);
   delay(100);
 
-  // Lower TX power slightly to improve stability and reduce power spikes
-  WiFi.setTxPower(WIFI_POWER_15dBm);
+  // v4.4 thermal management: this is a USB-stick form factor so the chip is
+  // right on the enclosure — every mW of TX power translates to felt heat.
+  // 11 dBm (12.5 mW) still reaches ~5 m indoors, which is plenty for a device
+  // that's typically 30 cm from the user's phone.
+  WiFi.setTxPower(WIFI_POWER_11dBm);
+  // Enable modem sleep between beacons — cuts idle radio draw ~40%. STA-side
+  // latency stays imperceptible for the dashboard's 5 s polling cadence.
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
 
   // Fix AP to channel 1. Specify max connections to reduce overhead.
-  if (!WiFi.softAP(ap_ssid.c_str(), ap_password.c_str(), 1, 0, 4)) {
+  // max_connection=2 is plenty for a personal tool (was 4).
+  if (!WiFi.softAP(ap_ssid.c_str(), ap_password.c_str(), 1, 0, 2)) {
     Serial.println("[WiFi] Failed to setup AP with password — trying open AP");
-    WiFi.softAP(ap_ssid.c_str(), "", 1, 0, 4);
+    WiFi.softAP(ap_ssid.c_str(), "", 1, 0, 2);
   }
 
   IPAddress IP = WiFi.softAPIP();
   Serial.print("[WiFi] AP started. IP: ");
   Serial.println(IP);
   logDebug("AP started, IP: " + IP.toString() + ", SSID: " + ap_ssid + " (Ch 1)");
+
+  // Captive-portal DNS: hijack all queries -> AP IP, so client OSes pop the
+  // built-in captive-portal browser straight at http://192.168.4.1/.
+  captiveDNS.setErrorReplyCode(DNSReplyCode::NoError);
+  if (captiveDNS.start(53, "*", IP)) {
+    captivePortalUp = true;
+    Serial.println("[WiFi] Captive-portal DNS started on port 53");
+  } else {
+    Serial.println("[WiFi] Captive-portal DNS failed to start");
+  }
+}
+
+void loopCaptivePortal() {
+  if (captivePortalUp) captiveDNS.processNextRequest();
 }
 
 void stopAP() {
+  if (captivePortalUp) { captiveDNS.stop(); captivePortalUp = false; }
   WiFi.softAPdisconnect(true);
   Serial.println("[WiFi] AP stopped");
   logDebug("AP stopped");
@@ -168,6 +197,25 @@ void joinWiFi(String ssid, String password) {
   // DO NOT call WiFi.mode() — already in AP_STA
   current_sta_ssid = ssid;
   current_sta_password = password;
+
+  // v4.12: Randomize MAC on STA connect if the user opted in (setup wizard
+  // or Settings toggle). The upstream router only ever sees this random MAC,
+  // so it can't track the ESP across networks by hardware address. We use
+  // esp_wifi_set_mac(WIFI_IF_STA, ...) with a locally-administered address
+  // (2nd LSB of first byte = 1, LSB = 0 for unicast).
+  if (preferences.getBool("random_mac", false)) {
+    uint8_t mac[6];
+    for (int i = 0; i < 6; i++) mac[i] = (uint8_t)(esp_random() & 0xFF);
+    mac[0] = (mac[0] & 0xFE) | 0x02;   // locally-administered, unicast
+    esp_err_t r = esp_wifi_set_mac(WIFI_IF_STA, mac);
+    if (r == ESP_OK) {
+      Serial.printf("[WiFi] Random STA MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+      Serial.printf("[WiFi] esp_wifi_set_mac failed (%d) - using factory MAC\n", (int)r);
+    }
+  }
+
   WiFi.begin(ssid.c_str(), password.c_str());
 
   wifiJoining = true;
@@ -323,10 +371,21 @@ std::vector<String> getSavedSSIDs() {
 
 void deleteWiFiCredential(String ssid) {
     if (!sdCardPresent || !SD.exists("/wifi_creds.txt")) return;
-    
+
     File f = SD.open("/wifi_creds.txt");
     File temp = SD.open("/temp_creds.txt", FILE_WRITE);
-    
+
+    // v4.4: if EITHER handle fails to open, DON'T touch the source file. The
+    // previous code plowed on and did SD.remove("/wifi_creds.txt") followed
+    // by SD.rename("/temp_creds.txt", "/wifi_creds.txt") — if the temp file
+    // never opened, ALL saved WiFi credentials were silently lost.
+    if (!f || !temp) {
+        if (f) f.close();
+        if (temp) temp.close();
+        Serial.println("[WiFi] deleteWiFiCredential: could not open working files — aborted (no data lost)");
+        return;
+    }
+
     while (f.available()) {
         String line = f.readStringUntil('\n');
         if (line.indexOf("SSID=\"" + ssid + "\"") == -1) {
@@ -335,8 +394,11 @@ void deleteWiFiCredential(String ssid) {
     }
     f.close();
     temp.close();
+    // Only swap into place after we've built a valid temp file.
     SD.remove("/wifi_creds.txt");
-    SD.rename("/temp_creds.txt", "/wifi_creds.txt");
+    if (!SD.rename("/temp_creds.txt", "/wifi_creds.txt")) {
+        Serial.println("[WiFi] deleteWiFiCredential: rename failed — creds file MAY be missing; check /temp_creds.txt");
+    }
     Serial.println("[WiFi] Deleted credentials for: " + ssid);
 }
 
