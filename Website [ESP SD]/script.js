@@ -122,10 +122,70 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
-                const insertion = "\n" + indent;
+                // v4.31: auto-insert the matching closer when Enter is
+                // pressed at the end of a block-OPENER line and the closer
+                // isn't already present downstream at the same/lesser
+                // indent. Applies to:
+                //   EXTENSION NAME    -> END_EXTENSION
+                //   FUNCTION NAME()   -> END_FUNCTION      (also DEF_)
+                //   IF ...            -> END_IF
+                //   FOR ...           -> END_FOR
+                //   WHILE ...         -> END_WHILE
+                //   REPEAT ...        -> END_REPEAT
+                //   REM_BLOCK         -> END_REM
+                //   STRING_BASH       -> END_STRING
+                //   STRING_POWERSHELL -> END_STRING
+                //   BUTTON_DEF ...    -> END_BUTTON
+                //   RUN_ON_REBOOT     -> END_RUN_ON_REBOOT
+                //   IF_DEFINED_TRUE   -> END_IF_DEFINED
+                //   IF_NOT_DEFINED_TRUE -> END_IF_DEFINED
+                // The closer is placed on a NEW line after the caret's new
+                // indented position, and the caret is left ON the indented
+                // body line (between opener and closer) so the user can
+                // start typing the body immediately.
+                let autoCloseSuffix = '';
+                {
+                    const opener = trimmedLine;
+                    const baseIndent = (currentLine.match(/^\s*/) || [""])[0];
+                    let closer = null;
+                    if (opener === 'EXTENSION' || opener.startsWith('EXTENSION ')) {
+                        // Only auto-close when there's a NAME after EXTENSION,
+                        // and NOT when the line ends with the collapsed ˅
+                        // marker (a collapsed ref doesn't need a closer).
+                        const rest = opener.substring('EXTENSION'.length).trim();
+                        if (rest && !rest.endsWith('˅')) closer = 'END_EXTENSION';
+                    }
+                    else if (opener.startsWith('FUNCTION ') || opener.startsWith('DEF_')) closer = 'END_FUNCTION';
+                    else if (opener === 'IF' || opener.startsWith('IF ') || opener.startsWith('IF(')) closer = 'END_IF';
+                    else if (opener === 'FOR' || opener.startsWith('FOR ') || opener.startsWith('FOR(')) closer = 'END_FOR';
+                    else if (opener === 'WHILE' || opener.startsWith('WHILE ') || opener.startsWith('WHILE(')) closer = 'END_WHILE';
+                    else if (opener === 'REPEAT' || opener.startsWith('REPEAT ')) closer = 'END_REPEAT';
+                    else if (opener === 'REM_BLOCK' || opener.startsWith('REM_BLOCK ')) closer = 'END_REM';
+                    else if (opener === 'STRING_BASH' || opener.startsWith('STRING_BASH ')) closer = 'END_STRING';
+                    else if (opener === 'STRING_POWERSHELL' || opener.startsWith('STRING_POWERSHELL ')) closer = 'END_STRING';
+                    else if (opener === 'BUTTON_DEF' || opener.startsWith('BUTTON_DEF ')) closer = 'END_BUTTON';
+                    else if (opener === 'RUN_ON_REBOOT' || opener.startsWith('RUN_ON_REBOOT ')) closer = 'END_RUN_ON_REBOOT';
+                    else if (opener.startsWith('IF_DEFINED_TRUE') || opener.startsWith('IF_NOT_DEFINED_TRUE')) closer = 'END_IF_DEFINED';
+
+                    if (closer) {
+                        // Look ahead: is there already a matching closer at
+                        // baseIndent or shallower on a following line? If so,
+                        // don't double-insert.
+                        const after = value.substring(start);
+                        const closerRE = new RegExp('^' + baseIndent.replace(/\t/g, '\\t') + '\\s*' + closer + '\\b', 'm');
+                        if (!closerRE.test(after)) {
+                            autoCloseSuffix = '\n' + baseIndent + closer;
+                        }
+                    }
+                }
+
+                const insertion = "\n" + indent + autoCloseSuffix;
                 const newStart = scriptArea.selectionStart;
                 scriptArea.value = scriptArea.value.substring(0, newStart) + insertion + scriptArea.value.substring(scriptArea.selectionEnd);
-                scriptArea.selectionStart = scriptArea.selectionEnd = newStart + insertion.length;
+                // Caret goes on the indented body line (right after "\n" + indent),
+                // NOT past the auto-inserted closer.
+                const caretAt = newStart + 1 + indent.length;
+                scriptArea.selectionStart = scriptArea.selectionEnd = caretAt;
                 updateGutter();
                 updateErrorLens();
                 syncScroll();
@@ -562,7 +622,24 @@ function applyHighlighting(line) {
 
     const cat = {
         text: ['STRING', 'STRINGLN'],
-        logic: ['IF', 'ELSE', 'ELIF', 'ENDIF', 'END_IF', 'REPEAT', 'END_REPEAT', 'WHILE', 'END_WHILE', 'FOR', 'FOR:', 'ENDFOR', 'END_FOR', 'WAIT_FOR_EVENT', 'RUN_AT_TIME', 'RUN_AT_DAY', 'RUN_WHEN_WIFI', 'IS_ONLINE', 'IS_OFFLINE', 'WIFI_OFF_WHEN_WIFI', 'WIFI_ON_WHEN_WIFI', 'BLUETOOTH_OFF_WHEN_WIFI', 'BLUETOOTH_ON_WHEN_WIFI', 'IF_CLIENT_CONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED', 'IF_CLIENT_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED_DISCONNECTED_WIFI', 'RUN_ON_REBOOT', 'END_RUN_ON_REBOOT', 'BLUETOOTH_DISCOVERY', 'RUN_WHEN_BLUETOOTH_FOUND', 'RUN_WHEN_BT_FOUND', 'BT_FOUND', 'FROM', 'TO', 'STEP', 'FUNCTION', 'DEF_', 'END_FUNCTION', 'END_DEF', 'BEGIN_ROWER', 'END_ROWER', 'IF_NOT_PRESENT', 'LOCALE', 'LOCALE_DE', 'LOCALE_EN', 'LOCALE_FR', 'LOCALE_ES', 'LOCALE_IT', 'LOCALE_UK'],
+        logic: ['IF', 'ELSE', 'ELIF', 'THEN', 'ENDIF', 'END_IF', 'REPEAT', 'END_REPEAT', 'WHILE', 'END_WHILE', 'FOR', 'FOR:', 'ENDFOR', 'END_FOR', 'WAIT_FOR_EVENT', 'RUN_AT_TIME', 'RUN_AT_DAY', 'RUN_WHEN_WIFI', 'IS_ONLINE', 'IS_OFFLINE', 'WIFI_OFF_WHEN_WIFI', 'WIFI_ON_WHEN_WIFI', 'BLUETOOTH_OFF_WHEN_WIFI', 'BLUETOOTH_ON_WHEN_WIFI', 'IF_CLIENT_CONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_WIFI', 'IF_CLIENT_DISCONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED', 'IF_CLIENT_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED', 'IF_CLIENT_CONNECTED_DISCONNECTED_BLUETOOTH', 'IF_CLIENT_CONNECTED_DISCONNECTED_WIFI', 'RUN_ON_REBOOT', 'END_RUN_ON_REBOOT', 'BLUETOOTH_DISCOVERY', 'RUN_WHEN_BLUETOOTH_FOUND', 'RUN_WHEN_BT_FOUND', 'BT_FOUND', 'FROM', 'TO', 'STEP', 'FUNCTION', 'DEF_', 'END_FUNCTION', 'END_DEF', 'BEGIN_ROWER', 'END_ROWER', 'IF_NOT_PRESENT', 'LOCALE', 'LOCALE_DE', 'LOCALE_EN', 'LOCALE_FR', 'LOCALE_ES', 'LOCALE_IT', 'LOCALE_UK',
+               // v4.31: EXTENSION framing + Hak5 3.0 preprocessor/runtime
+               // block markers now colour-coded (were rendered as plain
+               // white text before).
+               'EXTENSION', 'END_EXTENSION', 'RUN_EXTENSION', 'IMPORT',
+               'BUTTON_DEF', 'END_BUTTON', 'DISABLE_BUTTON', 'WAIT_FOR_BUTTON_PRESS',
+               'REM_BLOCK', 'END_REM',
+               'DEFINE', 'IF_DEFINED_TRUE', 'IF_NOT_DEFINED_TRUE',
+               'ELSE_DEFINED', 'END_IF_DEFINED',
+               'STRING_BASH', 'STRING_POWERSHELL', 'END_STRING', 'END_STRINGLN',
+               'HIDE_PAYLOAD', 'RESTORE_PAYLOAD', 'STOP_PAYLOAD',
+               'SOFT_BRICK', 'REVERT_TO_THUMBDRIVE', 'PERSIST',
+               'WAIT_FOR_CAPS_ON', 'WAIT_FOR_CAPS_OFF',
+               'WAIT_FOR_NUM_ON', 'WAIT_FOR_NUM_OFF',
+               'WAIT_FOR_SCROLL_ON', 'WAIT_FOR_SCROLL_OFF',
+               'WAIT_FOR_CAPS_CHANGE', 'WAIT_FOR_NUM_CHANGE', 'WAIT_FOR_SCROLL_CHANGE',
+               'WAIT_FOR_EOF', 'INJECT_MOD',
+               'SAVE_HOST_KEYBOARD_LOCK_STATE', 'RESTORE_HOST_KEYBOARD_LOCK_STATE'],
         delay: ['DELAY', 'DEFAULTDELAY', 'DEFAULT_DELAY'],
         mod: ['GUI', 'CTRL', 'ALT', 'SHIFT', 'CAPSLOCK', 'WINDOWS', 'CONTROL'],
         special: ['ENTER', 'TAB', 'ESC', 'ESCAPE', 'BACKSPACE', 'DELETE', 'DEL', 'HOME', 'END', 'PAGEUP', 'PAGEDOWN', 'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12', 'SPACE', 'PAUSE', 'BREAK', 'INSERT', 'PRINTSCREEN', 'SCROLLLOCK', 'MENU', 'APP', 'UP', 'UPARROW', 'DOWN', 'DOWNARROW', 'LEFT', 'LEFTARROW', 'RIGHT', 'RIGHTARROW', 'NUMLOCK'],
