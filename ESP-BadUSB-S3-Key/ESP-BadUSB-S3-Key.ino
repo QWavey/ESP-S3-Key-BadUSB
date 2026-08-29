@@ -367,7 +367,7 @@ void setup() {
   //
   // To force a reset on any future release, bump FIRMWARE_STAMP in Config.h.
   {
-    const uint32_t FIRMWARE_STAMP = 430;   // v4.30 - v4.29 firmware fixes (LED_IR/UV real ack, PING TCP reachability, WAIT_FOR_EVENT tud_mounted+pumps, tinyusb header include) + linter bug-hunt 8 findings (IF(/WHILE(/FOR( no-space form, VAR $name = value Hak5 3.0 decl, #DEFINE bare-invocation, expanded BUILTIN_VARIABLES, WHILE/REPEAT in var-usage check, Pass 1 skips opaqueLines, STRUCTURAL_KEYWORDS first-token guard, DELAY var-ref regex accepts bare identifiers)
+    const uint32_t FIRMWARE_STAMP = 432;   // v4.32 - EXTENSION NAME (empty body) or `EXTENSION NAME ˅` now AUTO-INLINES the ext body from SD (Pass 0 preprocessor), so DETECT_OS() / HELLO_OS() actually work after `EXTENSION os_detect` + `END_EXTENSION`. Recursion-guarded.
     uint32_t storedStamp = preferences.getUInt("fw_stamp", 0);
     if (storedStamp != FIRMWARE_STAMP) {
       Serial.printf("[BOOT] Firmware stamp changed (%u -> %u). Clearing "

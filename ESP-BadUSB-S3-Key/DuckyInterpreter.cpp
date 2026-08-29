@@ -176,6 +176,135 @@ void executeScript(const String& script) {
     pushBoth(script.substring(startIndex));
   }
 
+  // v4.32 Pass 0: EXPAND `EXTENSION NAME` empty-body blocks and
+  // `EXTENSION NAME ˅` collapsed refs by loading the ext body from the SD
+  // and inlining it. This matches Hak5 semantics - writing `EXTENSION NAME`
+  // in a payload is how you PULL IN an extension's FUNCTION defs so you can
+  // call them later. Without this, the block was a no-op and `DETECT_OS`
+  // silently failed as an unknown command.
+  //
+  // Also handled: `EXTENSION NAME ^ ... END_EXTENSION` inline-expanded form
+  // is left alone (real body already inlined, no SD lookup needed).
+  //
+  // Guard against infinite recursion by tracking already-inlined names.
+  {
+    static std::vector<String> alreadyInlined;   // recursion guard across nested calls
+    std::vector<String> expandedRaw;
+    std::vector<String> expandedLines;
+    for (size_t i = 0; i < rawLines.size(); i++) {
+      String raw = rawLines[i];
+      String t = raw; t.trim();
+      String u = t; u.toUpperCase();
+      // Match `EXTENSION NAME` (optionally followed by ˅ marker).
+      bool isExtOpener = u.startsWith("EXTENSION ");
+      if (!isExtOpener) {
+        expandedRaw.push_back(raw);
+        if (t.length() > 0) expandedLines.push_back(t);
+        continue;
+      }
+      // Extract name (strip any trailing ˅ / ^ marker + whitespace).
+      String rest = t.substring(String("EXTENSION ").length()); rest.trim();
+      bool collapsedMarker = rest.endsWith("\xCB\x85");   // "˅" utf-8 = CB 85
+      bool inlineMarker    = rest.endsWith("^");
+      if (collapsedMarker) rest = rest.substring(0, rest.length() - 2);
+      else if (inlineMarker) rest = rest.substring(0, rest.length() - 1);
+      rest.trim();
+      String extName = rest;
+      // Look ahead: what does the block body look like?
+      // We need to know if the next non-blank line is END_EXTENSION (empty
+      // body). Scan forward.
+      size_t j = i + 1;
+      bool emptyBody = false;
+      while (j < rawLines.size()) {
+        String tj = rawLines[j]; tj.trim();
+        if (tj.length() == 0) { j++; continue; }
+        String uj = tj; uj.toUpperCase();
+        if (uj == "END_EXTENSION") { emptyBody = true; break; }
+        break;   // some other content = non-empty body
+      }
+      bool shouldExpand = !inlineMarker && !extName.isEmpty() && (collapsedMarker || emptyBody);
+      if (!shouldExpand) {
+        // Keep the line as-is; the later pass will handle framing/strip.
+        expandedRaw.push_back(raw);
+        if (t.length() > 0) expandedLines.push_back(t);
+        continue;
+      }
+      // Recursion guard - don't inline an ext that's already up the stack.
+      String nameKey = extName; nameKey.toUpperCase();
+      bool alreadyIn = false;
+      for (auto& s : alreadyInlined) if (s == nameKey) { alreadyIn = true; break; }
+      if (alreadyIn) {
+        Serial.println("[EXTENSION] Skipping already-inlined: " + extName);
+        expandedRaw.push_back(raw);
+        if (t.length() > 0) expandedLines.push_back(t);
+        continue;
+      }
+      // Try (folder, suffix) combinations.
+      const char* folders[]  = { "/extensions/hak5/", "/extensions/custom/", "/extensions/" };
+      const char* suffixes[] = { "", ".txt", ".ext", ".dsx" };
+      String body = "";
+      String foundPath = "";
+      for (const char* f : folders) {
+        for (const char* s : suffixes) {
+          String path = String(f) + extName + s;
+          File file = SD.open(path);
+          if (file) {
+            body = file.readString();
+            file.close();
+            foundPath = path;
+            break;
+          }
+        }
+        if (body.length()) break;
+      }
+      if (body.length() == 0) {
+        lastError = "EXTENSION not found on SD: " + extName;
+        errorCount++;
+        Serial.println("[EXTENSION] " + lastError);
+        expandedRaw.push_back(raw);
+        if (t.length() > 0) expandedLines.push_back(t);
+        continue;
+      }
+      Serial.println("[EXTENSION] Inlined " + foundPath + " (" + String(body.length()) + " B)");
+      // If we had a collapsed-marker line, replace ONLY that line with:
+      //   EXTENSION NAME ^
+      //   <body>
+      //   END_EXTENSION
+      // If we had an empty-body pair (opener + END_EXTENSION), replace
+      // BOTH lines with the same inline expansion.
+      String openerOut = String("EXTENSION ") + extName + " ^";
+      expandedRaw.push_back(openerOut);
+      expandedLines.push_back(openerOut);
+      alreadyInlined.push_back(nameKey);
+      // Split body into lines and push each (same push logic as pushBoth).
+      int bStart = 0;
+      int bEnd = body.indexOf('\n');
+      auto pushBody = [&](const String& r) {
+        String rr = r;
+        if (rr.length() && rr.charAt(rr.length()-1) == '\r') rr.remove(rr.length()-1);
+        expandedRaw.push_back(rr);
+        String tr = rr; tr.trim();
+        if (tr.length() > 0) expandedLines.push_back(tr);
+      };
+      while (bEnd != -1) {
+        pushBody(body.substring(bStart, bEnd));
+        bStart = bEnd + 1;
+        bEnd = body.indexOf('\n', bStart);
+      }
+      if (bStart < (int)body.length()) pushBody(body.substring(bStart));
+      alreadyInlined.pop_back();
+      expandedRaw.push_back("END_EXTENSION");
+      expandedLines.push_back("END_EXTENSION");
+      // Skip the empty-body pair's END_EXTENSION we already know about.
+      if (emptyBody) {
+        // Advance i to j (the END_EXTENSION line) so the outer loop skips it.
+        i = j;
+      }
+    }
+    rawLines = expandedRaw;
+    lines    = expandedLines;
+  }
+
   // v4.17: DuckyScript preprocessor pass for Hak5 extension syntax.
   //   * strip EXTENSION <name> / END_EXTENSION framing (no-op wrappers)
   //   * strip REM_BLOCK ... END_REM multi-line comment blocks

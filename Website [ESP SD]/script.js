@@ -456,10 +456,36 @@ function updateGutter() {
     const scriptArea = document.getElementById('scriptArea');
     const gutter = document.getElementById('editorGutter');
     if (!scriptArea || !gutter) return;
-    const lines = scriptArea.value.split('\n').length;
+    // v4.32: render a click-to-fold arrow (▾ or ▸) next to any EXTENSION
+    // line so users don't have to move the caret + hit the toolbar button.
+    //   `EXTENSION NAME`             (empty body / auto-inline) -> ▾  collapses to ˅
+    //   `EXTENSION NAME ^`           (inline-expanded opener)   -> ▾  collapses to ˅
+    //   `EXTENSION NAME ˅`           (collapsed reference)      -> ▸  expands inline
+    const src = scriptArea.value.split('\n');
     let html = '';
-    for (let i = 1; i <= lines; i++) html += `<div>${i}</div>`;
+    for (let i = 0; i < src.length; i++) {
+        const t = src[i].trim();
+        let arrow = '';
+        if (/^EXTENSION\s+[A-Za-z0-9_.\-]+/i.test(t)) {
+            const isCollapsed = /˅\s*$/.test(t);
+            arrow = `<span class="gutter-fold" onclick="_gutterToggleFold(${i})" title="${isCollapsed ? 'Expand this extension' : 'Collapse this extension block'}">${isCollapsed ? '▸' : '▾'}</span>`;
+        }
+        html += `<div>${i + 1}${arrow}</div>`;
+    }
     gutter.innerHTML = html;
+}
+
+// v4.32: click-to-fold from a gutter arrow. Puts the caret on the given
+// line index then reuses the existing toggleExtensionAtCursor.
+function _gutterToggleFold(lineIdx) {
+    const sa = document.getElementById('scriptArea');
+    if (!sa) return;
+    const lines = sa.value.split('\n');
+    let pos = 0;
+    for (let k = 0; k < lineIdx && k < lines.length; k++) pos += lines[k].length + 1;
+    sa.focus();
+    sa.selectionStart = sa.selectionEnd = pos;
+    if (typeof toggleExtensionAtCursor === 'function') toggleExtensionAtCursor();
 }
 
 function pollSystemStatus() {

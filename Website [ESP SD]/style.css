@@ -395,23 +395,47 @@ select:focus, input:focus {
 }
 
 .editor-gutter {
-    width: 45px;
+    /* v4.32: widened so the ▾/▸ fold arrow next to EXTENSION lines has
+       room without pushing the code content around. */
+    width: 62px;
     background: rgba(255, 255, 255, 0.05);
     border-right: 1px solid var(--glass-border);
     color: var(--text-muted);
     font-family: 'Consolas', 'Courier New', monospace;
     font-size: 13px;
     padding: 15px 0;
-    text-align: center;
+    text-align: right;
+    padding-right: 6px;
     user-select: none;
     line-height: 22px; /* Must match textarea */
     white-space: pre;
     overflow-y: hidden;
+    position: relative;
 }
 
 .editor-gutter div {
     height: 22px;
     line-height: 22px;
+    position: relative;
+}
+
+/* v4.32: per-line fold arrow. Sits right of the line number, clickable,
+   turns primary-colour on hover so it's obviously actionable. */
+.editor-gutter .gutter-fold {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+    margin-left: 4px;
+    cursor: pointer;
+    color: var(--primary, #4caf50);
+    font-size: 13px;
+    line-height: 22px;
+    transition: transform 0.15s ease, color 0.15s ease;
+    user-select: none;
+}
+.editor-gutter .gutter-fold:hover {
+    transform: scale(1.35);
+    color: #fff;
 }
 
 .editor-main {
