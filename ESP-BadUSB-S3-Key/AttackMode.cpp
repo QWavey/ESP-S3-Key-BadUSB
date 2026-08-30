@@ -93,16 +93,14 @@ uint64_t effectiveStorageBytes() {
 bool handleAttackModeLine(const String& line) {
   if (!line.startsWith("ATTACKMODE")) return false;
 
-  AttackModeConfig cfg;               // start from a fresh default
-  cfg.vid = currentAttackMode.vid;    // keep last VID/PID if not overridden
-  cfg.pid = currentAttackMode.pid;
-  cfg.sizeBytes = currentAttackMode.sizeBytes;
-  // UX-friendly divergence from strict Hak5: HID stays on by default so users
-  // never brick themselves into a "storage-only, can't type recovery script"
-  // corner. `STORAGE_ONLY` (or explicit `OFF`) is required to actually drop
-  // the keyboard. Otherwise `ATTACKMODE STORAGE` = HID + MSC.
-  cfg.hid = true;
-  cfg.storage = false;
+  // v4.36 bug-hunt HIGH #9: seed cfg from currentAttackMode so tokens ONLY
+  // override the fields they actually mention. Prior code reset
+  // hid=true, storage=false on every line; `ATTACKMODE VID_XX PID_XX` on a
+  // device with storage=true would silently clear storage and trigger a
+  // stray composition-change reboot. Now: only tokens actually present
+  // change cfg.
+  AttackModeConfig cfg = currentAttackMode;
+  bool sawStorageToken = false, sawHidToken = false, sawOffToken = false;
 
   bool sizeGiven = false;
   uint64_t sizeReq = 0;
@@ -120,17 +118,17 @@ bool handleAttackModeLine(const String& line) {
     tok.toUpperCase();
 
     if (tok.length() == 0) continue;
-    if      (tokIs(tok, "HID"))                       cfg.hid = true;
-    else if (tokIs(tok, "STORAGE", "MSC", "STORE"))   cfg.storage = true;
-    else if (tokIs(tok, "STORAGE_ONLY", "MSC_ONLY"))  { cfg.storage = true; cfg.hid = false; }
-    else if (tokIs(tok, "NO_HID", "NOHID", "HID_OFF")) cfg.hid = false;
-    else if (tokIs(tok, "OFF"))                       { cfg.storage = false; /* keep HID so device remains reachable */ }
+    if      (tokIs(tok, "HID"))                       { cfg.hid = true; sawHidToken = true; }
+    else if (tokIs(tok, "STORAGE", "MSC", "STORE"))   { cfg.storage = true; sawStorageToken = true; }
+    else if (tokIs(tok, "STORAGE_ONLY", "MSC_ONLY"))  { cfg.storage = true; cfg.hid = false; sawStorageToken = true; sawHidToken = true; }
+    else if (tokIs(tok, "NO_HID", "NOHID", "HID_OFF")) { cfg.hid = false; sawHidToken = true; }
+    else if (tokIs(tok, "OFF"))                       { cfg.storage = false; sawStorageToken = true; sawOffToken = true; }
     // BLANK: tear the device completely off the bus. HID off, MSC off — after
     // the reboot the composite descriptor is empty and USB.begin() is skipped
     // entirely, so Windows / Linux see nothing at all (no HID keyboard, no
     // removable drive). Recovery: run "ATTACKMODE HID" via the web UI's
     // /execute endpoint or the "HID only" button in Settings.
-    else if (tokIs(tok, "BLANK", "NONE", "UNMOUNT"))  { cfg.hid = false; cfg.storage = false; }
+    else if (tokIs(tok, "BLANK", "NONE", "UNMOUNT"))  { cfg.hid = false; cfg.storage = false; sawHidToken = true; sawStorageToken = true; }
     else if (tok.startsWith("VID_")) {
       String v = tok.substring(4);
       if (v.length() == 0) { Serial.println("[ATTACKMODE] VID_ needs hex digits, ignored"); }

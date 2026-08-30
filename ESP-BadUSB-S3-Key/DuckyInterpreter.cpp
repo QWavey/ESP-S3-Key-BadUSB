@@ -23,9 +23,32 @@ struct LoopState {
 bool evalCondition(String condition) {
   condition.trim();
   condition = processVariables(condition);
+  // v4.36 bug-hunt HIGH #6: strip a matched wrapping `(...)` so Hak5's
+  // `IF ($_OS == LINUX)` doesn't split into `($_OS` / `LINUX)`.
+  // Loop in case the user wrote `((...))`.
+  while (condition.length() >= 2 && condition.charAt(0) == '(' &&
+         condition.charAt(condition.length() - 1) == ')') {
+    // Only strip when the parens actually pair around the whole thing
+    // (not `(a) && (b)` where the outer `(` matches an inner `)`).
+    int depth = 0; bool balanced = true;
+    for (uint32_t k = 0; k < condition.length(); k++) {
+      char c = condition.charAt(k);
+      if (c == '(') depth++;
+      else if (c == ')') { depth--; if (depth == 0 && k != condition.length() - 1) { balanced = false; break; } }
+    }
+    if (!balanced || depth != 0) break;
+    condition = condition.substring(1, condition.length() - 1);
+    condition.trim();
+  }
 
-  if (condition == "true" || condition == "1") return true;
-  if (condition == "false" || condition == "0") return false;
+  // v4.36 bug-hunt HIGH #7: case-insensitive TRUE/FALSE. Hak5 built-ins
+  // set the mirror vars to uppercase "TRUE"/"FALSE", but the old check
+  // only matched lowercase - `IF $_RECEIVED_HOST_LOCK_LED_REPLY` fell
+  // through to `condition.length() > 0` at the tail and was ALWAYS
+  // true, forcing the wrong branch in DETECT_OS.
+  String lower = condition; lower.toLowerCase();
+  if (lower == "true"  || condition == "1") return true;
+  if (lower == "false" || condition == "0") return false;
 
   // New Connection Condition Support
   if (condition == "IF_CLIENT_CONNECTED_BLUETOOTH") return (getBTClientCount() > 0);
@@ -38,6 +61,24 @@ bool evalCondition(String condition) {
   if (condition == "IF_CLIENT_CONNECTED_DISCONNECTED_BLUETOOTH") return true;
   if (condition == "IF_CLIENT_CONNECTED_DISCONNECTED_WIFI") return true;
 
+  // v4.36 bug-hunt HIGH #6: for `==` / `!=`, only trust the numeric
+  // parse when BOTH sides actually look like numbers - otherwise use
+  // string equality. Old code accepted `lVal == rVal` where both were
+  // 0.0 (because non-numeric strings toFloat() to 0), so `$_OS == LINUX`
+  // was true whenever $_OS was any non-numeric value.
+  auto isNum = [](const String& s) -> bool {
+    if (s.length() == 0) return false;
+    bool dot = false, digit = false;
+    uint32_t i = 0;
+    if (s.charAt(0) == '-' || s.charAt(0) == '+') i = 1;
+    for (; i < s.length(); i++) {
+      char c = s.charAt(i);
+      if (c >= '0' && c <= '9') digit = true;
+      else if (c == '.' && !dot) dot = true;
+      else return false;
+    }
+    return digit;
+  };
 
   String ops[] = {"==", "!=", ">=", "<=", ">", "<"};
   for (String op : ops) {
@@ -49,20 +90,27 @@ bool evalCondition(String condition) {
       right.trim();
 
       if (left.length() > 0 && right.length() > 0) {
-        float lVal = left.toFloat();
-        float rVal = right.toFloat();
-        
-        if (op == "==") return lVal == rVal || left == right;
-        if (op == "!=") return lVal != rVal || left != right;
-        if (op == ">=") return lVal >= rVal;
-        if (op == "<=") return lVal <= rVal;
-        if (op == ">") return lVal > rVal;
-        if (op == "<") return lVal < rVal;
+        bool bothNum = isNum(left) && isNum(right);
+        float lVal = bothNum ? left.toFloat()  : 0.0f;
+        float rVal = bothNum ? right.toFloat() : 0.0f;
+        // Case-insensitive string equality for the string-equality path.
+        String lU = left;  lU.toUpperCase();
+        String rU = right; rU.toUpperCase();
+
+        if (op == "==") return bothNum ? (lVal == rVal) : (lU == rU);
+        if (op == "!=") return bothNum ? (lVal != rVal) : (lU != rU);
+        if (op == ">=") return bothNum && lVal >= rVal;
+        if (op == "<=") return bothNum && lVal <= rVal;
+        if (op == ">")  return bothNum && lVal >  rVal;
+        if (op == "<")  return bothNum && lVal <  rVal;
       }
       break;
     }
   }
 
+  // Bare condition: truthy if non-empty AND not literal "false" / "0".
+  // (Was `condition.length() > 0` which returned true for "FALSE".)
+  if (lower == "false" || condition == "0") return false;
   return condition.length() > 0;
 }
 
@@ -761,6 +809,8 @@ void executeScript(const String& script) {
         i++;
       }
       if (remaining.length() > 0 && sdCardPresent) {
+        // v4.36 bug-hunt MEDIUM #14: append-mode guard.
+        if (SD.exists("/temp_resume.txt")) SD.remove("/temp_resume.txt");
         File f = SD.open("/temp_resume.txt", FILE_WRITE);
         if (f) { f.print(remaining); f.close(); }
         Serial.println("Resume script saved. Rebooting for USB identity change...");
@@ -1045,6 +1095,10 @@ void executeScript(const String& script) {
         extern String g_currentTopScript;
         const String& payload = g_currentTopScript;
         if (payload.length() > 0) {
+          // v4.36 bug-hunt MEDIUM #14: on some ESP32-Arduino SD library
+          // versions FILE_WRITE opens in append ("a") mode - remove any
+          // stale copy first so we get a clean truncate/replace.
+          if (SD.exists("/temp_resume.txt")) SD.remove("/temp_resume.txt");
           File f = SD.open("/temp_resume.txt", FILE_WRITE);
           if (f) { f.print(payload); f.close(); }
           Serial.printf("[ATTACKMODE] Persisted %u B (whole script) to /temp_resume.txt\n",

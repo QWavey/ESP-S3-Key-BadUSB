@@ -367,7 +367,7 @@ void setup() {
   //
   // To force a reset on any future release, bump FIRMWARE_STAMP in Config.h.
   {
-    const uint32_t FIRMWARE_STAMP = 435;   // v4.35 - ATTACKMODE VID/PID identity change now ALSO persist+reboots (was a no-op unmount/remount that never rebuilt the descriptor - "USB connect+disconnect then nothing types" symptom). Resume file is now the ORIGINAL top-level script (not internal slice), so re-run from top works even when ATTACKMODE fires inside a FUNCTION body.
+    const uint32_t FIRMWARE_STAMP = 436;   // v4.36 - CRITICAL: /temp_resume.txt & /reboot_script.txt were read via loadScript() which prepends /scripts/, so every ATTACKMODE reboot silently discarded the resume file. Now read from SD root directly. Also: evalCondition strips wrapping parens (`IF ($_OS == LINUX)`), case-insensitive TRUE/FALSE (Hak5 built-ins use uppercase), string equality path uses toUpperCase compare, `==`/`!=` fall back to string when either side isn't numeric. ATTACKMODE cfg seeded from currentAttackMode (tokens only override fields they mention). ensureHidReady+3s wait on resume path so first-plug driver-bind window doesn't drop early keystrokes.
     uint32_t storedStamp = preferences.getUInt("fw_stamp", 0);
     if (storedStamp != FIRMWARE_STAMP) {
       Serial.printf("[BOOT] Firmware stamp changed (%u -> %u). Clearing "
@@ -738,25 +738,52 @@ void setup() {
 
   setLED(0, 0, 255);   // v4.14: blue-only board — use B channel
 
-  // Check for reboot-once script (from RUN_ON_REBOOT block)
-  if (SD.exists("/reboot_script.txt")) {
-    Serial.println("Reboot script found - executing once");
-    String content = loadScript("/reboot_script.txt");
-    SD.remove("/reboot_script.txt");
+  // v4.36 CRITICAL fix: read the resume files DIRECTLY from the SD root.
+  // Prior code used loadScript(name) which internally prepends "/scripts/",
+  // so the reads went to /scripts//temp_resume.txt and /scripts//reboot_
+  // script.txt (both nonexistent) and returned "". Symptom: every ATTACKMODE
+  // reboot silently discarded the persisted script - the ESP came back with
+  // the new USB identity, deleted the resume file without reading it, and
+  // never called executeScript. This is the "USB attaches/detaches then
+  // nothing types" bug.
+  //
+  // Also: only remove the file AFTER a successful non-empty read, so a
+  // transient read failure doesn't nuke the payload permanently.
+  auto readSDRoot = [](const char* path) -> String {
+    if (!SD.exists(path)) return "";
+    File f = SD.open(path);
+    if (!f) return "";
+    String s = f.readString();
+    f.close();
+    return s;
+  };
+  {
+    String content = readSDRoot("/reboot_script.txt");
     if (content.length() > 0) {
-      delay(2000);
+      Serial.printf("Reboot script found (%u B) - executing once\n", (unsigned)content.length());
+      SD.remove("/reboot_script.txt");
+      // v4.36 HIGH #4/#5: when a resume file is present, force USB up NOW
+      // and wait long enough for a fresh HID identity's driver-bind window
+      // (Windows first-plug of an unfamiliar VID/PID can take 3-5s).
+      ensureHidReady();
+      delay(3000);
       executeScript(content);
+    } else if (SD.exists("/reboot_script.txt")) {
+      // File exists but read returned empty - keep it for a next-boot retry
+      // instead of silently deleting.
+      Serial.println("[RESUME] /reboot_script.txt read returned empty - keeping for retry");
     }
   }
-
-  // Check for USB identity change resume script (from RANDOM_VID/PID/MAN/PRODUCT)
-  if (SD.exists("/temp_resume.txt")) {
-    Serial.println("Resume script found after USB identity change - executing");
-    String content = loadScript("/temp_resume.txt");
-    SD.remove("/temp_resume.txt");
+  {
+    String content = readSDRoot("/temp_resume.txt");
     if (content.length() > 0) {
-      delay(2000);
+      Serial.printf("Resume script found (%u B) after USB identity change - executing\n", (unsigned)content.length());
+      SD.remove("/temp_resume.txt");
+      ensureHidReady();
+      delay(3000);
       executeScript(content);
+    } else if (SD.exists("/temp_resume.txt")) {
+      Serial.println("[RESUME] /temp_resume.txt read returned empty - keeping for retry");
     }
   }
 
