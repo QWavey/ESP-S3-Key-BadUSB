@@ -38,6 +38,12 @@ std::map<String, String> variables;
 // executeScript() entry so a stopped script's leftover BUTTON_DEF doesn't
 // swallow the next script's lines.
 bool g_buttonDefActive = false;
+// v4.34 bug-hunt CRITICAL #1: ATTACKMODE composition-change reboot flag.
+// AttackMode sets it; DuckyInterpreter's main executor sees it after the
+// current line, persists the remaining lines to /temp_resume.txt, then
+// reboots. Avoids losing the rest of a payload after ATTACKMODE flips
+// HID/STORAGE mid-script.
+volatile bool g_composeRebootPending = false;
 String lastCommand = "";
 bool scriptRunning = false;
 bool stopRequested = false;

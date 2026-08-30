@@ -685,6 +685,12 @@ function applyHighlighting(line) {
         return addToken('cmd-logic', '${') + p1 + addToken('cmd-logic', '}');
     });
 
+    // v4.33: EXTENSION / RUN_EXTENSION / IMPORT followed by a name -> colour
+    // the name distinctively (was rendered plain white in the user's image).
+    html = html.replace(/^(\s*)(EXTENSION|RUN_EXTENSION|IMPORT)(\s+)([A-Za-z0-9_.\-]+)/i, (m, sp, kw, sep, name) => {
+        return sp + addToken('cmd-logic', kw) + sep + addToken('cmd-ext-name', name);
+    });
+
     // 2. STRING / STRINGLN (Everything after is yellow, except shielded interpolations)
     const stringMatch = html.match(/^(\s*)(STRING|STRINGLN)(\s|$)(.*)/i);
     if (stringMatch) {
@@ -1804,26 +1810,124 @@ function refreshFileBrowser() {
         files.forEach(file => {
             const item = document.createElement('div');
             item.className = 'file-browser-item';
+            item.dataset.filePath = file.path;
+            item.dataset.fileName = file.name;
+            item.dataset.isDir    = file.isDirectory ? '1' : '0';
             const label = document.createElement('span');
             label.style.cssText = 'cursor:pointer;color:' + (file.isDirectory ? 'var(--primary)' : 'white');
             label.textContent = file.name + (file.isDirectory ? '/' : '');
             if (file.isDirectory) {
                 label.addEventListener('click', () => navigateToDirectory(file.path));
             } else {
-                // Pass the file object through closure, not through a serialized
-                // JSON.stringify splat that ended up in an attribute value.
-                label.addEventListener('click', function () { selectFileInBrowser(this, file); });
+                // v4.33: previous version called selectFileInBrowser which
+                // was never defined (regression from the v4.27 XSS refactor,
+                // console showed "selectFileInBrowser is not defined"). Now
+                // opens the context menu on plain click for touch parity.
+                label.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); openFileContextMenu(file, ev.clientX, ev.clientY); });
             }
             const delBtn = document.createElement('button');
             delBtn.className = 'danger';
             delBtn.style.cssText = 'padding:2px 6px;font-size:10px;';
             delBtn.textContent = 'Del';
-            delBtn.addEventListener('click', () => deleteBrowserFile(file.path));
+            delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteBrowserFile(file.path); });
             item.appendChild(label);
             item.appendChild(delBtn);
+
+            // v4.33: desktop right-click + mobile long-press both open a
+            // context menu for the file (Load / Copy path / Download /
+            // Delete / Rename).
+            item.addEventListener('contextmenu', (ev) => {
+                ev.preventDefault();
+                openFileContextMenu(file, ev.clientX, ev.clientY);
+            });
+            let __holdT = null, __holdFired = false;
+            item.addEventListener('touchstart', (ev) => {
+                __holdFired = false;
+                const t = ev.touches[0];
+                __holdT = setTimeout(() => {
+                    __holdFired = true;
+                    openFileContextMenu(file, t.clientX, t.clientY);
+                }, 550);
+            }, { passive: true });
+            const cancelHold = () => { if (__holdT) { clearTimeout(__holdT); __holdT = null; } };
+            item.addEventListener('touchmove', cancelHold, { passive: true });
+            item.addEventListener('touchend', (ev) => { cancelHold(); if (__holdFired) { ev.preventDefault(); } });
+            item.addEventListener('touchcancel', cancelHold, { passive: true });
+
             browser.appendChild(item);
         });
     });
+}
+
+// v4.33: file context menu (right-click on desktop, long-press on mobile).
+// Actions: Load into editor, Copy path, Download, Rename, Delete.
+// Old inline `selectFileInBrowser` call was undefined - this replaces it
+// with a real menu the user can act on.
+function openFileContextMenu(file, x, y) {
+    // Close any existing menu.
+    const existing = document.getElementById('fileCtxMenu');
+    if (existing) existing.remove();
+    const menu = document.createElement('div');
+    menu.id = 'fileCtxMenu';
+    menu.style.cssText =
+        'position:fixed;z-index:99999;background:#1e1e28;color:#fff;border-radius:10px;' +
+        'box-shadow:0 12px 40px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);' +
+        'min-width:200px;padding:6px 0;font-size:13px;';
+    // Anchor within viewport.
+    const vw = window.innerWidth, vh = window.innerHeight;
+    menu.style.left = Math.min(x, vw - 220) + 'px';
+    menu.style.top  = Math.min(y, vh - 260) + 'px';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'padding:8px 12px;font-family:monospace;font-size:11px;opacity:0.7;border-bottom:1px solid rgba(255,255,255,0.1);word-break:break-all;';
+    header.textContent = file.path;
+    menu.appendChild(header);
+
+    const mkItem = (label, handler, danger) => {
+        const it = document.createElement('div');
+        it.textContent = label;
+        it.style.cssText = 'padding:8px 14px;cursor:pointer;' + (danger ? 'color:#f55;' : '');
+        it.addEventListener('mouseover', () => it.style.background = 'rgba(76,175,80,0.15)');
+        it.addEventListener('mouseout',  () => it.style.background = '');
+        it.addEventListener('click', () => { menu.remove(); document.removeEventListener('click', closeOnce, true); handler(); });
+        menu.appendChild(it);
+    };
+
+    if (!file.isDirectory) {
+        mkItem('Open in editor',   () => {
+            fetch('/api/download?path=' + encodeURIComponent(file.path))
+                .then(r => r.ok ? r.text() : Promise.reject('HTTP ' + r.status))
+                .then(txt => {
+                    const sa = document.getElementById('scriptArea');
+                    if (sa) { sa.value = txt; if (typeof openTab === 'function') openTab(null, 'Script'); updateGutter(); updateErrorLens(); }
+                })
+                .catch(err => alert('Open failed: ' + err));
+        });
+        mkItem('Copy path',        () => { navigator.clipboard.writeText(file.path).catch(() => {}); });
+        mkItem('Download',         () => { window.open('/api/download?path=' + encodeURIComponent(file.path), '_blank'); });
+        mkItem('Rename…',          () => {
+            const n = prompt('New name for ' + file.name + ':', file.name);
+            if (!n || n === file.name) return;
+            const newPath = file.path.substring(0, file.path.lastIndexOf('/') + 1) + n;
+            fetch('/api/rename', { method: 'POST', headers: {'Content-Type':'application/json'},
+                                   body: JSON.stringify({ from: file.path, to: newPath }) })
+                .then(r => r.ok ? refreshFileBrowser() : r.text().then(t => alert('Rename failed: ' + t)))
+                .catch(err => alert('Rename failed: ' + err));
+        });
+    } else {
+        mkItem('Open folder',      () => navigateToDirectory(file.path));
+    }
+    mkItem('Delete', () => {
+        if (confirm('Delete "' + file.name + '"?')) deleteBrowserFile(file.path);
+    }, true);
+
+    const closeOnce = (e) => {
+        if (menu.contains(e.target)) return;
+        menu.remove();
+        document.removeEventListener('click', closeOnce, true);
+    };
+    setTimeout(() => document.addEventListener('click', closeOnce, true), 0);
+    document.body.appendChild(menu);
 }
 
 function executeScript() {
@@ -2297,6 +2401,14 @@ function displayScanResults(networks) {
         // Saved network badge
         const savedBadge = net.saved ? '<span style="font-size: 9px; background: #4CAF50; color: white; padding: 1px 4px; border-radius: 3px; margin-left: 5px; vertical-align: middle;">SAVED</span>' : '';
 
+        // v4.33: real signal-strength bars (5-bar ladder mapped from RSSI):
+        //   >=-55 dBm  -> 5 bars   (excellent)
+        //   -55..-65   -> 4 bars   (good)
+        //   -65..-75   -> 3 bars   (fair)
+        //   -75..-85   -> 2 bars   (weak)
+        //   <-85       -> 1 bar    (very weak)
+        const bars = getSignalBarsHtml(net.rssi);
+
         html += `
             <div class="file-item" onclick="selectWiFiNetwork('${ssid.replace(/'/g, "\\'")}')">
                 <div class="flex-row" style="justify-content: space-between; width: 100%;">
@@ -2306,6 +2418,7 @@ function displayScanResults(networks) {
                         ${savedBadge}
                     </div>
                     <div class="flex-row" style="gap: 8px; font-size: 11px; color: var(--text-muted); flex-shrink: 0;">
+                        ${bars}
                         <span>${lock}</span>
                         <span>${net.rssi} dBm</span>
                         <span style="font-size: 9px; opacity: 0.5;">CH ${net.channel}</span>
@@ -2314,6 +2427,19 @@ function displayScanResults(networks) {
             </div>`;
     });
     container.innerHTML = html;
+}
+
+function getSignalBarsHtml(rssi) {
+    let count;
+    if      (rssi >= -55) count = 5;
+    else if (rssi >= -65) count = 4;
+    else if (rssi >= -75) count = 3;
+    else if (rssi >= -85) count = 2;
+    else                  count = 1;
+    let s = '<span class="wifi-bars" aria-label="' + count + '/5 bars">';
+    for (let i = 1; i <= 5; i++) s += '<span class="bar' + (i <= count ? ' on' : '') + '"></span>';
+    s += '</span>';
+    return s;
 }
 
 function getSignalIcon(rssi) {
@@ -2433,29 +2559,35 @@ function refreshExtensionAutocompletePool() {
         // just skip that one. The cache is used by handleAutocompleteInput to
         // surface `DETECT_OS`/`HELLO_OS`/etc. ONLY when the current script
         // references the extension that defines them.
+        // v4.34 bug-hunt HIGH #7: throttle to 3 concurrent /api/load-extension
+        // requests instead of one Promise.all() burst. On a large corpus the
+        // ESP32 WebServer's tiny handle table would exhaust and starve other
+        // UI polling (/status, refreshFiles). Simple chunked walk.
         const nextMap = {};
-        await Promise.all(all.map(f => {
-            let url = '/api/load-extension?name=' + encodeURIComponent(f.name);
-            if (f.folder) url += '&folder=' + encodeURIComponent(f.folder);
-            return fetch(url).then(r => r.ok ? r.text() : '').then(txt => {
-                if (!txt) return;
-                // Robust FUNCTION-name scan: matches "FUNCTION NAME" (with or
-                // without () and with any indentation). Ignores REM lines.
-                const funcs = new Set();
-                for (const raw of txt.split('\n')) {
-                    const line = raw.trim();
-                    if (!line || line.startsWith('REM') || line.startsWith('//')) continue;
-                    const m = line.match(/^FUNCTION\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(?\)?\s*$/i);
-                    if (m) funcs.add(m[1].toUpperCase());
-                }
-                const arr = Array.from(funcs);
-                const stem = f.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
-                if (arr.length) {
-                    nextMap[f.name.toUpperCase()] = arr;
-                    if (stem && stem !== f.name) nextMap[stem.toUpperCase()] = arr;
-                }
-            }).catch(() => { /* skip this one */ });
-        }));
+        const CONCURRENCY = 3;
+        const scanBody = (f, txt) => {
+            const funcs = new Set();
+            for (const raw of txt.split('\n')) {
+                const line = raw.trim();
+                if (!line || line.startsWith('REM') || line.startsWith('//')) continue;
+                const m = line.match(/^FUNCTION\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(?\)?\s*$/i);
+                if (m) funcs.add(m[1].toUpperCase());
+            }
+            const arr = Array.from(funcs);
+            const stem = f.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
+            if (arr.length) {
+                nextMap[f.name.toUpperCase()] = arr;
+                if (stem && stem !== f.name) nextMap[stem.toUpperCase()] = arr;
+            }
+        };
+        for (let i = 0; i < all.length; i += CONCURRENCY) {
+            const chunk = all.slice(i, i + CONCURRENCY);
+            await Promise.all(chunk.map(f => {
+                let url = '/api/load-extension?name=' + encodeURIComponent(f.name);
+                if (f.folder) url += '&folder=' + encodeURIComponent(f.folder);
+                return fetch(url).then(r => r.ok ? r.text() : '').then(txt => { if (txt) scanBody(f, txt); }).catch(() => {});
+            }));
+        }
         __extFunctionsByStem = nextMap;
     }).catch(() => { /* silent: keep whatever pool we had */ })
       .finally(() => {
@@ -4964,10 +5096,40 @@ function refreshExtensions() {
             items.forEach(f => {
                 const row = document.createElement('div');
                 row.className = 'file-item';
-                row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:8px 10px;cursor:pointer;';
-                row.innerHTML = '<span style="font-family:monospace;">' + escapeHtml(f.name) + '</span>' +
-                                '<span style="color:var(--text-muted);font-size:11px;">' + f.size + ' B</span>';
-                row.onclick = () => loadExtension(f.name, folder);
+                row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;';
+                const nameEl = document.createElement('span');
+                nameEl.style.cssText = 'font-family:monospace;flex:1;cursor:pointer;';
+                nameEl.textContent = f.name;
+                nameEl.title = 'Click to edit this extension';
+                nameEl.addEventListener('click', () => loadExtension(f.name, folder));
+                const sizeEl = document.createElement('span');
+                sizeEl.style.cssText = 'color:var(--text-muted);font-size:11px;';
+                sizeEl.textContent = f.size + ' B';
+                // v4.33: "Insert" button - drops
+                //   EXTENSION <stem>
+                //   END_EXTENSION
+                // into the Coding-tab editor at the caret, then switches
+                // to the Coding tab. Matches the user's ask: "when clicking
+                // an extension in the Extensions tab it should be added to
+                // the Coding tab and automatically applied END_EXTENSION".
+                const insertBtn = document.createElement('button');
+                insertBtn.textContent = 'Insert →';
+                insertBtn.title = 'Insert an EXTENSION reference into the Coding tab (auto END_EXTENSION)';
+                insertBtn.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:6px;background:var(--primary,#4caf50);color:#000;border:none;cursor:pointer;';
+                insertBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const stem = f.name.replace(/\.(txt|ext|dsx|dd)$/i, '');
+                    if (typeof insertAtEditorCursor === 'function') {
+                        insertAtEditorCursor('EXTENSION ' + stem + '\nEND_EXTENSION\n');
+                    } else {
+                        const sa = document.getElementById('scriptArea');
+                        if (sa) { sa.value += (sa.value.endsWith('\n') ? '' : '\n') + 'EXTENSION ' + stem + '\nEND_EXTENSION\n'; sa.dispatchEvent(new Event('input', {bubbles:true})); }
+                    }
+                    if (typeof openTab === 'function') openTab(null, 'Script');
+                });
+                row.appendChild(nameEl);
+                row.appendChild(sizeEl);
+                row.appendChild(insertBtn);
                 wrap.appendChild(row);
             });
             box.appendChild(wrap);
@@ -5279,7 +5441,11 @@ function toggleExtensionAtCursor() {
     // Walk down from the caret to find its enclosing EXTENSION block.
     // Match either the expanded opener (`EXTENSION NAME ^`), the collapsed
     // reference (`EXTENSION NAME ˅`), or a plain `EXTENSION NAME` opener.
-    const openRE  = /^(\s*)EXTENSION\s+([A-Za-z0-9_.\-]+)(?:\s+(\^|˅))?\s*$/;
+    // v4.34 bug-hunt MEDIUM #10: accept `EXTENSION name˅` with NO space
+    // between the name and the ˅/^ marker (mobile keyboards drop the
+    // space; firmware Pass 0 at DuckyInterpreter.cpp:207 already accepts
+    // it, so the two sides need to agree).
+    const openRE  = /^(\s*)EXTENSION\s+([A-Za-z0-9_.\-]+)\s*(\^|˅)?\s*$/;
     const closeRE = /^\s*END_EXTENSION\s*$/;
 
     // If the caret line itself is a collapsed reference, expand it.
@@ -5327,11 +5493,14 @@ function toggleExtensionAtCursor() {
 }
 
 function _expandExtensionRefLine(idx, indent, name, sa, lines) {
-    // Try (folder, suffix) combinations - mirrors expandAllExtensionRefs.
+    // v4.34 bug-hunt MEDIUM #11: folder OUTER, suffix INNER - matches the
+    // firmware Pass 0 order (DuckyInterpreter.cpp:268) so a legacy
+    // /extensions/foo.txt is found in far fewer round-trips than before,
+    // where a legacy root file needed 12 attempts through hak5+custom+bare.
     const suffixes = ['', '.txt', '.ext', '.dsx'];
     const folders  = ['hak5', 'custom', ''];
     const attempts = [];
-    for (const s of suffixes) for (const f of folders) attempts.push({ name: name + s, folder: f });
+    for (const f of folders) for (const s of suffixes) attempts.push({ name: name + s, folder: f });
     const one = (i) => {
         if (i >= attempts.length) return Promise.resolve(null);
         const a = attempts[i];
@@ -5535,7 +5704,8 @@ function expandAllExtensionRefs() {
         const suffixes = ['', '.txt', '.ext', '.dsx'];
         const folders  = ['hak5', 'custom', ''];
         const attempts = [];
-        for (const s of suffixes) for (const f of folders) attempts.push({ name: j.name + s, folder: f });
+        // v4.34 bug-hunt MEDIUM #11: folder OUTER, suffix INNER.
+        for (const f of folders) for (const s of suffixes) attempts.push({ name: j.name + s, folder: f });
         const one = (i) => {
             if (i >= attempts.length) return { ok:false, name:j.name };
             const a = attempts[i];

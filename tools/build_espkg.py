@@ -85,14 +85,40 @@ def run_compile(sketch_dir, build_dir, fqbn, force_clean):
 
 
 def run_flash(build_dir, fqbn, port):
+    # v4.34 bug-hunt HIGH #9: retry once with a targeted hint when the port
+    # is busy (very common while the ESP is in MSC mount mode or a Serial
+    # monitor is holding the port). Cuts down "arduino-cli exited 1"
+    # opaque failures the user hits routinely.
+    import time
     cli = _find_arduino_cli()
+    def _once():
+        return subprocess.run(
+            [cli, "upload", "--fqbn", fqbn, "--port", port, "--input-dir", build_dir],
+            check=False, capture_output=True, text=True,
+        )
     print(f"[flash] arduino-cli upload → {port}")
-    r = subprocess.run(
-        [cli, "upload", "--fqbn", fqbn, "--port", port, "--input-dir", build_dir],
-        check=False,
-    )
+    r = _once()
     if r.returncode != 0:
+        combined = ((r.stdout or "") + (r.stderr or "")).lower()
+        looks_busy = any(hint in combined for hint in (
+            "port is busy", "permission denied", "resource busy",
+            "could not open", "access is denied", "cannot open"))
+        if looks_busy:
+            print(f"[flash] port busy - retrying in 1.5s...", file=sys.stderr)
+            time.sleep(1.5)
+            r = _once()
+    if r.returncode != 0:
+        if r.stderr:
+            print(r.stderr.rstrip(), file=sys.stderr)
+        # Targeted hint before we bail out.
+        combined = ((r.stdout or "") + (r.stderr or "")).lower()
+        if any(hint in combined for hint in ("port is busy", "could not open", "access is denied")):
+            print(f"[flash] HINT: {port} is held by another process. "
+                  f"Close Serial monitor / esp_stream.py / eject MSC mount, then retry.",
+                  file=sys.stderr)
         sys.exit(f"[flash] arduino-cli exited {r.returncode}")
+    if r.stdout:
+        print(r.stdout.rstrip())
     print(f"[flash] uploaded to {port}")
 
 MAGIC = b"ESPKG\x01"
@@ -122,10 +148,15 @@ def build(web_dir, firmware, out_path, version, extra_files):
             print(f"  ! skipping missing {local_name}", file=sys.stderr)
 
     # Any explicitly listed extra files: "localpath:/sd/path"
+    # v4.34 bug-hunt HIGH #8: rsplit so a Windows drive letter (`C:\...`) in
+    # the LOCAL path doesn't get split at the drive-letter colon. SD path
+    # must always start with '/' - we enforce it here.
     for spec in extra_files or []:
         if ":" not in spec:
             sys.exit(f"--file expects LOCAL:/sd/path, got: {spec}")
-        local, sd_path = spec.split(":", 1)
+        local, sd_path = spec.rsplit(":", 1)
+        if not sd_path.startswith("/"):
+            sys.exit(f"--file SD target must start with '/': got '{sd_path}' from spec '{spec}'")
         with open(local, "rb") as f:
             sd_entries.append((sd_path, f.read()))
 
@@ -136,6 +167,15 @@ def build(web_dir, firmware, out_path, version, extra_files):
     if firmware:
         with open(firmware, "rb") as f:
             fw_bytes = f.read()
+        # v4.34 bug-hunt MEDIUM: sanity-check firmware size. A half-written
+        # aborted flash can leave a truncated .bin; packaging it as a valid
+        # .espkg would let the auto-updater brick a device. Real builds
+        # are ~1.7 MB; anything under 500 KB is almost certainly broken.
+        FIRMWARE_MIN_BYTES = 500 * 1024
+        if len(fw_bytes) < FIRMWARE_MIN_BYTES:
+            sys.exit(f"[build] firmware.bin looks truncated ({len(fw_bytes):,} B < "
+                     f"{FIRMWARE_MIN_BYTES:,}). Re-run the compile and try again.")
+        print(f"[build] firmware {len(fw_bytes):,} B  crc32={crc32_hex(fw_bytes)}")
 
     # Build the manifest.
     manifest = {

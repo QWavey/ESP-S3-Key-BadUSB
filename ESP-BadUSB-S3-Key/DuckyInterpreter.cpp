@@ -187,10 +187,19 @@ void executeScript(const String& script) {
   // is left alone (real body already inlined, no SD lookup needed).
   //
   // Guard against infinite recursion by tracking already-inlined names.
+  // v4.34: run Pass 0 as a fixed-point loop. An inlined ext body may itself
+  // contain another `EXTENSION xxx` empty-body form (a common Hak5 pattern
+  // where OS_DETECT is chained from HELLO_OS etc.). Loop until nothing new
+  // gets expanded, bounded at 6 passes to bound runaway recursion.
   {
-    static std::vector<String> alreadyInlined;   // recursion guard across nested calls
-    std::vector<String> expandedRaw;
-    std::vector<String> expandedLines;
+    // Recursion guard is per-executeScript-invocation, not `static` - a
+    // leftover static entry from a previous run could silently disable a
+    // legitimate inline in the next script.
+    std::vector<String> alreadyInlined;
+    for (int hop = 0; hop < 6; hop++) {
+      std::vector<String> expandedRaw;
+      std::vector<String> expandedLines;
+      bool anyExpanded = false;
     for (size_t i = 0; i < rawLines.size(); i++) {
       String raw = rawLines[i];
       String t = raw; t.trim();
@@ -204,27 +213,51 @@ void executeScript(const String& script) {
       }
       // Extract name (strip any trailing ˅ / ^ marker + whitespace).
       String rest = t.substring(String("EXTENSION ").length()); rest.trim();
-      bool collapsedMarker = rest.endsWith("\xCB\x85");   // "˅" utf-8 = CB 85
-      bool inlineMarker    = rest.endsWith("^");
-      if (collapsedMarker) rest = rest.substring(0, rest.length() - 2);
-      else if (inlineMarker) rest = rest.substring(0, rest.length() - 1);
-      rest.trim();
+      // v4.34 (bug-hunt MEDIUM #10): accept `EXTENSION name˅` with NO space
+      // before the marker (some mobile keyboards, or after in-editor
+      // collapse race). Match trailing `^`/`˅` with or without a leading
+      // separator.
+      bool collapsedMarker = false, inlineMarker = false;
+      if (rest.endsWith("\xCB\x85")) { collapsedMarker = true; rest = rest.substring(0, rest.length() - 2); rest.trim(); }
+      else if (rest.endsWith("^"))   { inlineMarker    = true; rest = rest.substring(0, rest.length() - 1); rest.trim(); }
       String extName = rest;
       // Look ahead: what does the block body look like?
-      // We need to know if the next non-blank line is END_EXTENSION (empty
-      // body). Scan forward.
+      // v4.34 (bug-hunt CRITICAL #2): skip REM / // / REM_BLOCK lines when
+      // deciding if the body is empty - a `EXTENSION os_detect / REM loads /
+      // END_EXTENSION` was incorrectly detected as non-empty and silently
+      // failed to inline.
       size_t j = i + 1;
       bool emptyBody = false;
+      bool inRemBlock = false;
       while (j < rawLines.size()) {
         String tj = rawLines[j]; tj.trim();
-        if (tj.length() == 0) { j++; continue; }
         String uj = tj; uj.toUpperCase();
+        if (inRemBlock) {
+          if (uj == "END_REM") inRemBlock = false;
+          j++;
+          continue;
+        }
+        if (tj.length() == 0 || uj == "REM" || uj.startsWith("REM ") || tj.startsWith("//")) { j++; continue; }
+        if (uj == "REM_BLOCK" || uj.startsWith("REM_BLOCK ")) { inRemBlock = true; j++; continue; }
         if (uj == "END_EXTENSION") { emptyBody = true; break; }
         break;   // some other content = non-empty body
       }
+      // v4.34 (bug-hunt HIGH #6): the auto-inline path only runs when the
+      // block form clearly asks for it (empty body OR the `˅` marker OR the
+      // v4.32 collapsed shorthand). A user-written `EXTENSION FOO / ...body... /
+      // END_EXTENSION` scope wrapper is a legitimate no-op and MUST NOT
+      // spurious-error "EXTENSION not found on SD". Also skip when there's
+      // no SD mounted - the lookup would fail anyway and just pollute
+      // errorCount so the UI can't tell real errors from missing-SD noise.
       bool shouldExpand = !inlineMarker && !extName.isEmpty() && (collapsedMarker || emptyBody);
       if (!shouldExpand) {
-        // Keep the line as-is; the later pass will handle framing/strip.
+        expandedRaw.push_back(raw);
+        if (t.length() > 0) expandedLines.push_back(t);
+        continue;
+      }
+      extern bool sdCardPresent;
+      if (!sdCardPresent) {
+        Serial.println("[EXTENSION] No SD - skipping inline of: " + extName);
         expandedRaw.push_back(raw);
         if (t.length() > 0) expandedLines.push_back(t);
         continue;
@@ -239,14 +272,21 @@ void executeScript(const String& script) {
         if (t.length() > 0) expandedLines.push_back(t);
         continue;
       }
-      // Try (folder, suffix) combinations.
-      const char* folders[]  = { "/extensions/hak5/", "/extensions/custom/", "/extensions/" };
+      // Try (folder, suffix) combinations - case-insensitive on the name.
+      // v4.33: the user's SD may store `os_detect.txt` while the payload
+      // writes `EXTENSION OS_DETECT` (uppercase). FAT is case-insensitive
+      // on the host but ESP32's Arduino-SD wrapper does strict-case
+      // matching. Fall back to a directory scan comparing uppercased names
+      // if the exact path missed.
+      const char* folders[]  = { "/extensions/hak5", "/extensions/custom", "/extensions" };
       const char* suffixes[] = { "", ".txt", ".ext", ".dsx" };
       String body = "";
       String foundPath = "";
+      String extUpper = extName; extUpper.toUpperCase();
       for (const char* f : folders) {
+        // (a) exact-case attempt across suffixes.
         for (const char* s : suffixes) {
-          String path = String(f) + extName + s;
+          String path = String(f) + "/" + extName + s;
           File file = SD.open(path);
           if (file) {
             body = file.readString();
@@ -255,6 +295,38 @@ void executeScript(const String& script) {
             break;
           }
         }
+        if (body.length()) break;
+        // (b) case-insensitive directory scan - open the folder, walk names,
+        // compare uppercased with/without suffix.
+        File dir = SD.open(f);
+        if (!dir || !dir.isDirectory()) { if (dir) dir.close(); continue; }
+        File entry = dir.openNextFile();
+        while (entry) {
+          if (!entry.isDirectory()) {
+            String name = String(entry.name());
+            // ESP-SD returns just the leaf on newer cores, full path on older.
+            int slash = name.lastIndexOf('/');
+            if (slash >= 0) name = name.substring(slash + 1);
+            String nameUp = name; nameUp.toUpperCase();
+            String stemUp = nameUp;
+            int dot = stemUp.lastIndexOf('.');
+            if (dot >= 0) stemUp = stemUp.substring(0, dot);
+            if (nameUp == extUpper || stemUp == extUpper) {
+              String path = String(f) + "/" + name;
+              File file = SD.open(path);
+              if (file) {
+                body = file.readString();
+                file.close();
+                foundPath = path;
+              }
+              entry.close();
+              break;
+            }
+          }
+          entry.close();
+          entry = dir.openNextFile();
+        }
+        dir.close();
         if (body.length()) break;
       }
       if (body.length() == 0) {
@@ -266,6 +338,7 @@ void executeScript(const String& script) {
         continue;
       }
       Serial.println("[EXTENSION] Inlined " + foundPath + " (" + String(body.length()) + " B)");
+      anyExpanded = true;
       // If we had a collapsed-marker line, replace ONLY that line with:
       //   EXTENSION NAME ^
       //   <body>
@@ -292,7 +365,9 @@ void executeScript(const String& script) {
         bEnd = body.indexOf('\n', bStart);
       }
       if (bStart < (int)body.length()) pushBody(body.substring(bStart));
-      alreadyInlined.pop_back();
+      // Note: alreadyInlined stays populated until the outer per-run loop
+      // exits (v4.34: needed so a chained inline can't recursively re-inline
+      // the same body).
       expandedRaw.push_back("END_EXTENSION");
       expandedLines.push_back("END_EXTENSION");
       // Skip the empty-body pair's END_EXTENSION we already know about.
@@ -301,8 +376,11 @@ void executeScript(const String& script) {
         i = j;
       }
     }
-    rawLines = expandedRaw;
-    lines    = expandedLines;
+      rawLines = expandedRaw;
+      lines    = expandedLines;
+      if (!anyExpanded) break;   // fixed-point reached
+    }
+    // Recursion guard is a per-invocation local; nothing to reset here.
   }
 
   // v4.17: DuckyScript preprocessor pass for Hak5 extension syntax.
@@ -324,7 +402,14 @@ void executeScript(const String& script) {
     // applies to normal user scripts. Same source, both semantics: extension
     // authors get spec-correct behaviour, casual users don't accidentally
     // brick themselves out.
-    bool inExtension = false;
+    // v4.34 (bug-hunt HIGH #5): DEPTH counter, not bool. Pass 0 wraps
+    // inlined ext bodies in their own `EXTENSION x ^ ... END_EXTENSION`,
+    // so nested wrappers are common after Pass 0. A bool would clear on
+    // the first END_EXTENSION and treat the rest of an outer wrapper as
+    // "not in an extension" - the Hak5-strict ATTACKMODE STORAGE rewrite
+    // would silently skip.
+    int  extensionDepth = 0;
+    auto inExtension = [&]() { return extensionDepth > 0; };
     // Pass 1: strip REM_BLOCK, EXTENSION, END_EXTENSION and gather DEFINEs.
     // v4.19 additions:
     //   * STRING_BASH / STRING_POWERSHELL / bare STRING starting a block:
@@ -372,14 +457,14 @@ void executeScript(const String& script) {
         continue;
       }
       if (upper == "REM_BLOCK" || upper.startsWith("REM_BLOCK ")) { inRemBlock = true; continue; }
-      if (upper == "EXTENSION" || upper.startsWith("EXTENSION ")) { inExtension = true; continue; }
-      if (upper == "END_EXTENSION") { inExtension = false; continue; }
+      if (upper == "EXTENSION" || upper.startsWith("EXTENSION ")) { extensionDepth++; continue; }
+      if (upper == "END_EXTENSION") { if (extensionDepth > 0) extensionDepth--; continue; }
       // v4.21: Hak5-strict semantics inside EXTENSION blocks - rewrite a
       // bare `ATTACKMODE STORAGE` (without HID mentioned anywhere) into
       // `ATTACKMODE STORAGE_ONLY` so the composite drops HID like the Hak5
       // spec says. Outside extension blocks, our UX-friendly HID+STORAGE
       // default still applies.
-      if (inExtension && upper.startsWith("ATTACKMODE ")) {
+      if (inExtension() && upper.startsWith("ATTACKMODE ")) {
         String args = upper.substring(String("ATTACKMODE ").length());
         // "STORAGE" appears but neither HID nor HID_STORAGE nor STORAGE_ONLY
         // is already there? Then it's the Hak5-bare form; rewrite.
@@ -934,6 +1019,33 @@ void executeScript(const String& script) {
     executeCommand(line);
     totalCommandsExecuted++;
     if (stopRequested) break;
+    // v4.34 bug-hunt CRITICAL #1: if the command we just ran was an
+    // ATTACKMODE that flipped HID/STORAGE composition (which requires a
+    // full reboot to rebuild USB descriptors), persist the REMAINING lines
+    // to /temp_resume.txt and restart. Without this the reboot lost every
+    // instruction after the ATTACKMODE call.
+    extern volatile bool g_composeRebootPending;
+    if (g_composeRebootPending) {
+      g_composeRebootPending = false;
+      if (sdCardPresent) {
+        String remaining = "";
+        for (size_t k = i + 1; k < lines.size(); k++) {
+          String rl = lines[k]; rl.trim();
+          if (rl.length() > 0) remaining += rl + "\n";
+        }
+        if (remaining.length() > 0) {
+          File f = SD.open("/temp_resume.txt", FILE_WRITE);
+          if (f) { f.print(remaining); f.close(); }
+          Serial.printf("[ATTACKMODE] Persisted %u B of remaining payload to /temp_resume.txt\n", (unsigned)remaining.length());
+        }
+      }
+      Serial.println("[ATTACKMODE] Unmounting USB before reboot...");
+      tud_disconnect();
+      delay(600);
+      Serial.println("[ATTACKMODE] Rebooting to rebuild USB descriptors...");
+      ESP.restart();
+      return; // never reached
+    }
     if (defaultDelay > 0) {
       unsigned long delayStart = millis();
       while (millis() - delayStart < (unsigned long)defaultDelay && !stopRequested) delay(10);

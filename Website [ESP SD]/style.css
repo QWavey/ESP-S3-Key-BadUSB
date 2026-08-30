@@ -609,6 +609,21 @@ select:focus, input:focus {
 .syntax-cmd-mod { color: #8be9fd !important; }
 .syntax-cmd-special { color: #ffb86c !important; }
 .syntax-cmd-sys { color: #bd93f9 !important; }
+/* v4.33: EXTENSION / RUN_EXTENSION / IMPORT arg name - distinctive
+   cyan-ish so the extension name pops next to its green EXTENSION keyword
+   (was rendered plain white before). */
+.syntax-cmd-ext-name { color: #8be9fd !important; font-weight: 500; }
+
+/* v4.33: WiFi signal bars for the /api/scan-wifi picker. Five bars,
+   fill by RSSI. Vertical, monospaced widths, primary-colour when active. */
+.wifi-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; width: 22px; margin-right: 6px; vertical-align: middle; }
+.wifi-bars .bar { width: 3px; background: rgba(255,255,255,0.18); border-radius: 1px; transition: background 0.15s; }
+.wifi-bars .bar.on { background: var(--primary, #4caf50); }
+.wifi-bars .bar:nth-child(1) { height: 3px; }
+.wifi-bars .bar:nth-child(2) { height: 6px; }
+.wifi-bars .bar:nth-child(3) { height: 9px; }
+.wifi-bars .bar:nth-child(4) { height: 12px; }
+.wifi-bars .bar:nth-child(5) { height: 14px; }
 
 .syntax-comment { color: #6272a4 !important; font-style: italic; }
 .syntax-string { color: #f1fa8c !important; }

@@ -181,26 +181,48 @@ bool handleAttackModeLine(const String& line) {
   // Detect composition change vs current state (requires reboot to re-enumerate)
   bool composeChanged = (cfg.hid     != currentAttackMode.hid) ||
                         (cfg.storage != currentAttackMode.storage);
+  // v4.33: VID/PID or manufacturer/product change WITHOUT composition change
+  // also requires a re-enumerate cycle - the host caches the old descriptor
+  // until it sees an unplug. Symptom the user hit: `ATTACKMODE HID VID_05AC
+  // PID_021E` inside OS_DETECT changed the identity to Apple, USB attached
+  // then detached, then STRING typed nothing because the host hadn't bound
+  // the new keyboard driver yet. Do a short unmount/remount + settle
+  // instead of a full reboot (much faster).
+  bool identityChanged = (cfg.vid != currentAttackMode.vid) ||
+                         (cfg.pid != currentAttackMode.pid);
 
   currentAttackMode = cfg;
   saveAttackModePrefs();
 
-  Serial.printf("[ATTACKMODE] hid=%d storage=%d vid=%04x pid=%04x size=%llu bytes (compose_changed=%d)\n",
-                cfg.hid, cfg.storage, cfg.vid, cfg.pid, cfg.sizeBytes, composeChanged);
+  Serial.printf("[ATTACKMODE] hid=%d storage=%d vid=%04x pid=%04x size=%llu bytes (compose_changed=%d, ident_changed=%d)\n",
+                cfg.hid, cfg.storage, cfg.vid, cfg.pid, cfg.sizeBytes, composeChanged, identityChanged);
 
   if (composeChanged) {
-    // Physically drop off the USB bus BEFORE the reboot so the host sees a
-    // proper unplug event and any mounted MSC drive is dismissed cleanly.
-    // Without this, Windows sometimes leaves the previous descriptor cached
-    // and shows the drive again for a few seconds after the reboot.
-    Serial.println("[ATTACKMODE] Unmounting USB before reboot...");
+    // v4.34 bug-hunt CRITICAL #1: instead of restarting IMMEDIATELY from
+    // deep inside executeCommand() and losing the rest of the payload,
+    // set a global flag. The executor sees this after the current command
+    // returns, writes the remaining lines to /temp_resume.txt (mirroring
+    // the RANDOM_VID/PID path), then restarts. On next boot, setup()
+    // picks up /temp_resume.txt and continues where we left off.
+    extern volatile bool g_composeRebootPending;
+    Serial.println("[ATTACKMODE] Composition changed - deferring reboot until executor persists remainder");
+    g_composeRebootPending = true;
+  } else if (identityChanged) {
+    // v4.33: unmount → wait a bit for host to see the unplug → remount → wait
+    // for the host to bind the new HID descriptor. Prevents keystroke loss
+    // during the re-enumerate window.
+    Serial.println("[ATTACKMODE] VID/PID changed - unmount+remount cycle to re-enumerate...");
     tud_disconnect();
-    // Give the web server ~600 ms to flush the /execute HTTP 200 response over
-    // WiFi. Without this the browser sees the socket die mid-reply and shows a
-    // "disconnected" error banner even though the reboot succeeded.
-    delay(600);
-    Serial.println("[ATTACKMODE] Rebooting to rebuild USB descriptors...");
-    ESP.restart();
+    delay(500);        // host sees unplug
+    tud_connect();
+    // Wait until the new descriptor is bound (or 2s ceiling). Windows takes
+    // ~600-1200 ms to bind an HID keyboard driver from a cold enum.
+    unsigned long t0 = millis();
+    while (!tud_mounted() && (millis() - t0) < 2000) delay(20);
+    // Small extra settle so the first STRING keystroke isn't consumed by the
+    // driver's init code path (empirical - Windows/Linux both need ~200 ms).
+    delay(200);
+    Serial.printf("[ATTACKMODE] Re-enum settle done in %lu ms\n", millis() - t0);
   }
   return true;
 }

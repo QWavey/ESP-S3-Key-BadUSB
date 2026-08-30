@@ -367,7 +367,7 @@ void setup() {
   //
   // To force a reset on any future release, bump FIRMWARE_STAMP in Config.h.
   {
-    const uint32_t FIRMWARE_STAMP = 432;   // v4.32 - EXTENSION NAME (empty body) or `EXTENSION NAME ˅` now AUTO-INLINES the ext body from SD (Pass 0 preprocessor), so DETECT_OS() / HELLO_OS() actually work after `EXTENSION os_detect` + `END_EXTENSION`. Recursion-guarded.
+    const uint32_t FIRMWARE_STAMP = 434;   // v4.34 - bug-hunt CRITICAL/HIGH fixes: ATTACKMODE composition-change reboot now persists lines[i..] to /temp_resume.txt (fixes "reboot mid-run kills the script"), Pass 0 auto-inliner skips REM in look-ahead + case-insensitive SD lookup + fixed-point loop for chained ext refs + skips when no SD + no-space ˅/^ marker accepted, inExtension bool → depth counter (nested wrappers), tools/build_espkg.py Windows drive-letter fix + retry-on-busy + truncated-.bin sanity check
     uint32_t storedStamp = preferences.getUInt("fw_stamp", 0);
     if (storedStamp != FIRMWARE_STAMP) {
       Serial.printf("[BOOT] Firmware stamp changed (%u -> %u). Clearing "
