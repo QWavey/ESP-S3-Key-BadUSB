@@ -367,7 +367,7 @@ void setup() {
   //
   // To force a reset on any future release, bump FIRMWARE_STAMP in Config.h.
   {
-    const uint32_t FIRMWARE_STAMP = 434;   // v4.34 - bug-hunt CRITICAL/HIGH fixes: ATTACKMODE composition-change reboot now persists lines[i..] to /temp_resume.txt (fixes "reboot mid-run kills the script"), Pass 0 auto-inliner skips REM in look-ahead + case-insensitive SD lookup + fixed-point loop for chained ext refs + skips when no SD + no-space ˅/^ marker accepted, inExtension bool → depth counter (nested wrappers), tools/build_espkg.py Windows drive-letter fix + retry-on-busy + truncated-.bin sanity check
+    const uint32_t FIRMWARE_STAMP = 435;   // v4.35 - ATTACKMODE VID/PID identity change now ALSO persist+reboots (was a no-op unmount/remount that never rebuilt the descriptor - "USB connect+disconnect then nothing types" symptom). Resume file is now the ORIGINAL top-level script (not internal slice), so re-run from top works even when ATTACKMODE fires inside a FUNCTION body.
     uint32_t storedStamp = preferences.getUInt("fw_stamp", 0);
     if (storedStamp != FIRMWARE_STAMP) {
       Serial.printf("[BOOT] Firmware stamp changed (%u -> %u). Clearing "

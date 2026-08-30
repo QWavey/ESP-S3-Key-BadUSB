@@ -98,6 +98,11 @@ void executeScript(const String& script) {
   }
   g_scriptDepth++;
   const bool topLevel = (g_scriptDepth == 1);
+  // v4.35: capture original script text at the top level so the ATTACKMODE
+  // reboot-persist path can save the WHOLE script (not internal
+  // preprocessed slices) to /temp_resume.txt.
+  extern String g_currentTopScript;
+  if (topLevel) g_currentTopScript = script;
 
   scriptRunning = true;
   stopRequested = false;
@@ -1028,15 +1033,22 @@ void executeScript(const String& script) {
     if (g_composeRebootPending) {
       g_composeRebootPending = false;
       if (sdCardPresent) {
-        String remaining = "";
-        for (size_t k = i + 1; k < lines.size(); k++) {
-          String rl = lines[k]; rl.trim();
-          if (rl.length() > 0) remaining += rl + "\n";
-        }
-        if (remaining.length() > 0) {
+        // v4.35: save the WHOLE ORIGINAL top-level script (not the
+        // internal `lines[i+1..]` slice). Rationale: if the ATTACKMODE
+        // fired from inside a FUNCTION body (typical - OS_DETECT's body
+        // is where the identity flip lives), the slice would resume
+        // mid-function-body without its FUNCTION declaration, breaking
+        // later `NAME()` calls. Re-running the whole script after boot
+        // is safe: the ATTACKMODE call it hits again will see identity
+        // already matches (NVS was updated pre-reboot) → no-op → the
+        // script continues past it naturally.
+        extern String g_currentTopScript;
+        const String& payload = g_currentTopScript;
+        if (payload.length() > 0) {
           File f = SD.open("/temp_resume.txt", FILE_WRITE);
-          if (f) { f.print(remaining); f.close(); }
-          Serial.printf("[ATTACKMODE] Persisted %u B of remaining payload to /temp_resume.txt\n", (unsigned)remaining.length());
+          if (f) { f.print(payload); f.close(); }
+          Serial.printf("[ATTACKMODE] Persisted %u B (whole script) to /temp_resume.txt\n",
+                        (unsigned)payload.length());
         }
       }
       Serial.println("[ATTACKMODE] Unmounting USB before reboot...");

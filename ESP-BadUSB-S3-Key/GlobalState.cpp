@@ -44,6 +44,12 @@ bool g_buttonDefActive = false;
 // reboots. Avoids losing the rest of a payload after ATTACKMODE flips
 // HID/STORAGE mid-script.
 volatile bool g_composeRebootPending = false;
+// v4.35: top-level script text captured at every executeScript(depth=0)
+// entry. Used ONLY by the ATTACKMODE reboot-persist path so the resume
+// file contains the WHOLE user script (not the internal preprocessed
+// lines[i+1..], which - if ATTACKMODE fires inside a FUNCTION body -
+// would resume mid-function without its declaration).
+String g_currentTopScript = "";
 String lastCommand = "";
 bool scriptRunning = false;
 bool stopRequested = false;

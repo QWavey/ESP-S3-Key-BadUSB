@@ -144,6 +144,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 // body line (between opener and closer) so the user can
                 // start typing the body immediately.
                 let autoCloseSuffix = '';
+                // v4.35: EXTENSION is normally EMPTY-body ("pull in FUNCTION
+                // defs from SD"), not a scaffold you type code into. So its
+                // auto-close should collapse the block to two lines
+                //   EXTENSION name
+                //   END_EXTENSION
+                // and leave the caret on line 3 (after the closer), not on
+                // an indented body line between opener and closer.
+                // Every OTHER opener keeps the "caret in the body" behavior
+                // (FUNCTION/IF/FOR/WHILE/REPEAT/BUTTON_DEF/... all expect a
+                // body).
+                let closerLayout = 'body';   // 'body' = caret between; 'trailing' = caret AFTER closer
                 {
                     const opener = trimmedLine;
                     const baseIndent = (currentLine.match(/^\s*/) || [""])[0];
@@ -153,7 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         // and NOT when the line ends with the collapsed ˅
                         // marker (a collapsed ref doesn't need a closer).
                         const rest = opener.substring('EXTENSION'.length).trim();
-                        if (rest && !rest.endsWith('˅')) closer = 'END_EXTENSION';
+                        if (rest && !rest.endsWith('˅')) { closer = 'END_EXTENSION'; closerLayout = 'trailing'; }
                     }
                     else if (opener.startsWith('FUNCTION ') || opener.startsWith('DEF_')) closer = 'END_FUNCTION';
                     else if (opener === 'IF' || opener.startsWith('IF ') || opener.startsWith('IF(')) closer = 'END_IF';
@@ -174,17 +185,37 @@ document.addEventListener('DOMContentLoaded', () => {
                         const after = value.substring(start);
                         const closerRE = new RegExp('^' + baseIndent.replace(/\t/g, '\\t') + '\\s*' + closer + '\\b', 'm');
                         if (!closerRE.test(after)) {
-                            autoCloseSuffix = '\n' + baseIndent + closer;
+                            // 'trailing': opener\nCLOSER\n<caret>
+                            // 'body':     opener\n<indent><caret>\n<baseIndent>CLOSER
+                            if (closerLayout === 'trailing') {
+                                autoCloseSuffix = baseIndent + closer + '\n';
+                            } else {
+                                autoCloseSuffix = '\n' + baseIndent + closer;
+                            }
+                        } else {
+                            closerLayout = 'body';   // don't reposition caret if we didn't insert one
                         }
+                    } else {
+                        closerLayout = 'body';
                     }
                 }
 
-                const insertion = "\n" + indent + autoCloseSuffix;
+                let insertion, caretAt;
                 const newStart = scriptArea.selectionStart;
+                if (closerLayout === 'trailing') {
+                    // Layout: `<opener>\n<CLOSER>\n<caret>`
+                    insertion = "\n" + autoCloseSuffix;
+                    caretAt   = newStart + insertion.length;
+                } else if (autoCloseSuffix) {
+                    // Layout: `<opener>\n<indent><caret>\n<baseIndent><CLOSER>`
+                    insertion = "\n" + indent + autoCloseSuffix;
+                    caretAt   = newStart + 1 + indent.length;
+                } else {
+                    // No closer to insert - regular Enter.
+                    insertion = "\n" + indent;
+                    caretAt   = newStart + insertion.length;
+                }
                 scriptArea.value = scriptArea.value.substring(0, newStart) + insertion + scriptArea.value.substring(scriptArea.selectionEnd);
-                // Caret goes on the indented body line (right after "\n" + indent),
-                // NOT past the auto-inserted closer.
-                const caretAt = newStart + 1 + indent.length;
                 scriptArea.selectionStart = scriptArea.selectionEnd = caretAt;
                 updateGutter();
                 updateErrorLens();
@@ -690,6 +721,29 @@ function applyHighlighting(line) {
     html = html.replace(/^(\s*)(EXTENSION|RUN_EXTENSION|IMPORT)(\s+)([A-Za-z0-9_.\-]+)/i, (m, sp, kw, sep, name) => {
         return sp + addToken('cmd-logic', kw) + sep + addToken('cmd-ext-name', name);
     });
+
+    // v4.35: bare `NAME` or `NAME()` line at top level that resolves to an
+    // in-scope extension function (via __extFunctionsByStem) OR a
+    // globally-declared FUNCTION - colour distinctively so the user sees
+    // that HELLO_OS after `EXTENSION hello_os.txt` is a known callable,
+    // not an unknown token. Uses the same source-of-truth the linter uses.
+    {
+        const bareMatch = html.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\(\))?\s*$/);
+        if (bareMatch) {
+            const name = bareMatch[2].toUpperCase();
+            let known = (typeof globalDeclaredFunctions !== 'undefined' && globalDeclaredFunctions.has && globalDeclaredFunctions.has(name));
+            if (!known && typeof _autocompleteFunctionsFromReferencedExtensions === 'function') {
+                try {
+                    const sa = document.getElementById('scriptArea');
+                    const scope = _autocompleteFunctionsFromReferencedExtensions(sa ? sa.value : '');
+                    if (scope && scope.has && scope.has(name)) known = true;
+                } catch (_) {}
+            }
+            if (known) {
+                html = bareMatch[1] + addToken('cmd-ext-name', bareMatch[2]) + (bareMatch[3] || '');
+            }
+        }
+    }
 
     // 2. STRING / STRINGLN (Everything after is yellow, except shielded interpolations)
     const stringMatch = html.match(/^(\s*)(STRING|STRINGLN)(\s|$)(.*)/i);

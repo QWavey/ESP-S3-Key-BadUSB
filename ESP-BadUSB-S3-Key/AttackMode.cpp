@@ -197,32 +197,26 @@ bool handleAttackModeLine(const String& line) {
   Serial.printf("[ATTACKMODE] hid=%d storage=%d vid=%04x pid=%04x size=%llu bytes (compose_changed=%d, ident_changed=%d)\n",
                 cfg.hid, cfg.storage, cfg.vid, cfg.pid, cfg.sizeBytes, composeChanged, identityChanged);
 
-  if (composeChanged) {
-    // v4.34 bug-hunt CRITICAL #1: instead of restarting IMMEDIATELY from
-    // deep inside executeCommand() and losing the rest of the payload,
-    // set a global flag. The executor sees this after the current command
-    // returns, writes the remaining lines to /temp_resume.txt (mirroring
-    // the RANDOM_VID/PID path), then restarts. On next boot, setup()
-    // picks up /temp_resume.txt and continues where we left off.
+  // v4.35: BOTH composition change AND identity (VID/PID) change require a
+  // REAL REBOOT to take effect - the tinyusb descriptor is built once at
+  // USB.begin() from the NVS-persisted VID/PID and can't be swapped live.
+  // Attempting tud_disconnect()+tud_connect() only re-cycles the SAME
+  // descriptor, so the host sees an unplug/replug of the OLD identity and
+  // the intended new identity never appears. Symptom: user's OS_DETECT
+  // script does "connect+disconnect sound" then nothing types, because
+  // the payload continued running against the WRONG (old) HID identity
+  // and the DETECT_OS logic assumed the new Apple keyboard was live.
+  //
+  // Now: any ATTACKMODE change that alters composition OR VID/PID sets
+  // g_composeRebootPending, so the executor persists lines[i+1..] to
+  // /temp_resume.txt and reboots. setup() picks up the resume file after
+  // the ESP re-enumerates with the NEW identity from NVS.
+  if (composeChanged || identityChanged) {
     extern volatile bool g_composeRebootPending;
-    Serial.println("[ATTACKMODE] Composition changed - deferring reboot until executor persists remainder");
+    Serial.println(composeChanged
+        ? "[ATTACKMODE] Composition changed - deferring reboot until executor persists remainder"
+        : "[ATTACKMODE] VID/PID identity changed - deferring reboot to rebuild descriptor with new identity");
     g_composeRebootPending = true;
-  } else if (identityChanged) {
-    // v4.33: unmount → wait a bit for host to see the unplug → remount → wait
-    // for the host to bind the new HID descriptor. Prevents keystroke loss
-    // during the re-enumerate window.
-    Serial.println("[ATTACKMODE] VID/PID changed - unmount+remount cycle to re-enumerate...");
-    tud_disconnect();
-    delay(500);        // host sees unplug
-    tud_connect();
-    // Wait until the new descriptor is bound (or 2s ceiling). Windows takes
-    // ~600-1200 ms to bind an HID keyboard driver from a cold enum.
-    unsigned long t0 = millis();
-    while (!tud_mounted() && (millis() - t0) < 2000) delay(20);
-    // Small extra settle so the first STRING keystroke isn't consumed by the
-    // driver's init code path (empirical - Windows/Linux both need ~200 ms).
-    delay(200);
-    Serial.printf("[ATTACKMODE] Re-enum settle done in %lu ms\n", millis() - t0);
   }
   return true;
 }
