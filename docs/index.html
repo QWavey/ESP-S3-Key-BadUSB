@@ -296,6 +296,33 @@
 
 </div>
 
+<script>
+// Draw the figure in immediately on load, before the module (which imports the
+// esptool bundle) runs — so there is no solid-then-redraw flash. Per-shape path
+// length; no requestAnimationFrame and no resting state hidden in a keyframe,
+// so a background tab or reduced motion just leaves the figure solid.
+(function () {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var svg = document.querySelector('.device');
+  if (!svg) return;
+  var shapes = [].slice.call(svg.querySelectorAll('.shell *, .board *, .part *, .passive *, .card *'))
+    .filter(function (el) { return typeof el.getTotalLength === 'function'; });
+  var measured = [];
+  shapes.forEach(function (el) {
+    var len = 0; try { len = el.getTotalLength(); } catch (e) { return; }
+    if (!len) return;
+    el.style.strokeDasharray = len; el.style.strokeDashoffset = len;
+    measured.push({ el: el, len: len });
+  });
+  if (!measured.length) return;
+  measured.forEach(function (m, i) {
+    var dur = Math.min(1100, 260 + m.len * 1.1);
+    m.el.style.transition = 'stroke-dashoffset ' + dur + 'ms cubic-bezier(0.28,0.11,0.32,1) ' + (120 + i * 9) + 'ms';
+  });
+  void svg.getBoundingClientRect();
+  measured.forEach(function (m) { m.el.style.strokeDashoffset = '0'; });
+})();
+</script>
 <script type="module" src="./js/flasher.js"></script>
 </body>
 </html>
