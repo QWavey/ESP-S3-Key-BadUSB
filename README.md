@@ -6,6 +6,14 @@ a microSD slot.
 
 ![ESP32-S3-Dongle hardware — USB-A key form factor with SD-card slot on the back and the GPIO0 push-button top-centre.](docs/hardware.jpg)
 
+## Flash it in your browser
+
+No toolchain, no command line — flash the firmware straight from the browser over WebSerial:
+
+### → https://qwavey.github.io/ESP-S3-Key-BadUSB/
+
+Chrome or Edge. The page writes the latest release image to the chip locally; nothing is uploaded. It also takes a raw `.bin` or an `.espkg` bundle, and can flash several devices in one session. Part of the [QWavey flashers hub](https://qwavey.github.io/flashers/).
+
 
 
 THIS README NEEDS A REWRITE
