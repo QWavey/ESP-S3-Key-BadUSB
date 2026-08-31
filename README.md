@@ -6,6 +6,12 @@ a microSD slot.
 
 ![ESP32-S3-Dongle hardware — USB-A key form factor with SD-card slot on the back and the GPIO0 push-button top-centre.](docs/hardware.jpg)
 
+
+
+THIS README NEEDS A REWRITE
+
+
+
 ## Board
 
 | Function | GPIO | Notes |
