@@ -145,6 +145,15 @@ code {
   padding: var(--s-3) var(--s-5);
   border-bottom: 1px solid var(--line-1);
 }
+.box-lead { display: flex; align-items: baseline; gap: var(--s-4); min-width: 0; }
+.backlink {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px; letter-spacing: 0.02em; color: var(--gray-2);
+  text-decoration: none; white-space: nowrap; flex: none;
+  transition: color var(--d-1) var(--e-out);
+}
+.backlink:hover { color: var(--white); }
+@media (max-width: 560px) { .backlink { font-size: 0; } .backlink::before { content: "90"; font-size: 14px; } }
 
 .brandline {
   margin: 0;
@@ -271,10 +280,11 @@ body[data-step="1"] .device .boot circle,
 body[data-step="1"] .device .boot path { stroke: var(--accent); }
 
 /* The LED reads the flash state, because on the real board it does too. */
-.device .led { transition: fill var(--d-2) var(--e-out); }
-body[data-state="live"]  .device .led { fill: var(--accent); }
-body[data-state="ok"]    .device .led { fill: var(--ok); }
-body[data-state="error"] .device .led { fill: var(--err); }
+/* The board's status LED is a fixed hardware colour, not a UI signal. It only
+   blinks while data is actually moving (flashing), the way the real one does. */
+.device .led { fill: var(--led, #0A84FF); }
+body[data-state="live"] .device .led { animation: ledBlink 0.5s steps(1, end) infinite; }
+@keyframes ledBlink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0.25; } }
 
 .spec {
   display: grid;
@@ -873,7 +883,7 @@ body[data-state="ok"] .fx-port { opacity: 1; animation: fxseat 0.5s var(--e-appl
 
 
 /* ---- ESP32-S3 flasher: board-specific figure bits ---------------------- */
-:root { --boot-origin: 43% 69%; }   /* BOOT sits near the USB end */
+:root { --boot-origin: 43% 69%; --led: #0A84FF; }   /* BOOT near USB; blue status LED */
 
 .device .mod {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
