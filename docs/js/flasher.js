@@ -184,6 +184,7 @@ function extractEspkgApp(buf) {
 let transport = null;
 let esploader = null;
 let flashing = false;
+let stopping = false;
 let images = null;         // pending fileArray
 
 $('btnConnect').onclick = async () => {
@@ -264,6 +265,7 @@ async function runFlash() {
       },
     });
 
+    if (stopping) throw new Error('stopped');
     setPhase('resetting');
     log('flash: done, resetting', 'ok');
     try { await esploader.after('hard_reset'); } catch (_) {}
@@ -271,7 +273,18 @@ async function runFlash() {
     setPhase('done'); mapState('done');
     setStatus('Flashed', 'ok');
     log('done. the device is rebooting into the new firmware.', 'ok');
-    setTimeout(() => goTo(4), 700);
+    // "Flash multiple devices": drop this unit and loop back to Connect so the
+    // next board can be picked, instead of ending on the done screen.
+    if ($('flashMany') && $('flashMany').checked) {
+      log('flash many: unplug this device, plug the next, then Connect.', 'ok');
+      try { if (transport) await transport.disconnect(); } catch (_) {}
+      transport = null; esploader = null;
+      $('btnFlash').disabled = true;
+      setStatus('Next device', 'ok');
+      setTimeout(() => goTo(2), 900);
+    } else {
+      setTimeout(() => goTo(4), 700);
+    }
   } catch (e) {
     const msg = (e && e.message) ? e.message : String(e);
     log('flash: ' + msg, 'err'); showFlashError(msg);
@@ -282,6 +295,32 @@ async function runFlash() {
     flashing = false;
   }
 }
+
+// ---- Stop / reset: clear the progress cells and drop the connection --------
+function clearPageMap() {
+  mapCells.forEach(c => c.classList.remove('on', 'next', 'fail'));
+  const wrap = $('pagemap');
+  if (wrap) { wrap.classList.remove('is-done', 'is-error', 'is-erasing'); wrap.setAttribute('aria-valuenow', '0'); }
+  if ($('rdDone')) $('rdDone').textContent = '0';
+  if ($('rdParts')) $('rdParts').textContent = `0 / ${images ? images.length : 0} parts`;
+  setPhase('ready'); showFlashError(null);
+}
+async function stopFlash() {
+  // Abort an in-flight write by dropping the transport (writeFlash then throws,
+  // and its catch marks the error state), then wipe the progress boxes.
+  if (flashing) {
+    stopping = true;
+    log('stop: aborting flash', 'err');
+    try { if (transport) await transport.disconnect(); } catch (_) {}
+    transport = null; esploader = null;
+  }
+  flashing = false;
+  clearPageMap();
+  setStatus(esploader ? 'Connected' : 'No device', esploader ? 'ok' : 'idle');
+  $('btnFlash').disabled = !esploader;
+  stopping = false;
+}
+const _btnStop = $('btnStop'); if (_btnStop) _btnStop.addEventListener('click', stopFlash);
 
 // ---- Hold to flash (irreversible, so it takes a deliberate press) ----------
 const HOLD_MS = 700;
