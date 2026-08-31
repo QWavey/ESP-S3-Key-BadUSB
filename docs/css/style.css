@@ -265,7 +265,8 @@ code {
 }
 
 .device .callout { fill: none; stroke: var(--line-2); stroke-width: 0.7; }
-.device .callout circle { fill: var(--accent); stroke: none; }
+.device .callout circle { fill: var(--gray-2); stroke: none; }
+.device .callout circle.ledpin { fill: var(--led, #0A84FF); }
 .device .callout text {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 23px; font-weight: 500; letter-spacing: 0.02em;
