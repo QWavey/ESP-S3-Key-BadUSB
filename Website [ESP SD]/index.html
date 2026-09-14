@@ -299,12 +299,12 @@
 
                     <div class="setting-group">
                         <h4 data-tour="toggles-header">Toggles</h4>
-                        <div class="flex-row" style="justify-content: space-between; margin-bottom: 10px;">
+                        <div class="flex-row" data-setting="led" style="justify-content: space-between; margin-bottom: 10px;">
                             <span>Hardware LED</span>
                             <label class="switch"><input type="checkbox" id="ledToggle" checked onchange="toggleLED()"><span class="slider"></span></label>
                         </div>
                         <!-- v4.17: toggle whether the LED blinks fast during payload execution. -->
-                        <div class="flex-row" style="justify-content: space-between; margin-bottom: 10px;">
+                        <div class="flex-row" data-setting="led" style="justify-content: space-between; margin-bottom: 10px;">
                             <span title="When ON, the LED fast-blinks blue while a DuckyScript payload is running. When OFF, it stays solid.">Blink LED while executing payloads</span>
                             <label class="switch"><input type="checkbox" id="blinkOnRunToggle" checked onchange="toggleBlinkOnRun()"><span class="slider"></span></label>
                         </div>

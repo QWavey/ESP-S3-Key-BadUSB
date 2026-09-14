@@ -2022,6 +2022,19 @@ function updateStats() {
         .then(r => r.json())
         .then(data => {
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        // Firmware-driven UI hiding: /api/stats may include a
+        // `hidden_settings` array (["led"], ["led","com"], ...). Any
+        // element with a `data-setting` attribute matching one of the
+        // entries is hidden. Lets a single dashboard serve every
+        // firmware variant (Key, devkitc, Watch) — each firmware just
+        // returns its own list.
+        if (Array.isArray(data.hidden_settings)) {
+            const hide = new Set(data.hidden_settings);
+            document.querySelectorAll('[data-setting]').forEach(el => {
+                const key = el.getAttribute('data-setting');
+                el.style.display = hide.has(key) ? 'none' : '';
+            });
+        }
         set('errorCount', data.errorCount);
         set('totalScripts', data.totalScripts);
         set('totalCommands', data.totalCommands);
