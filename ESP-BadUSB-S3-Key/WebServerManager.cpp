@@ -39,9 +39,76 @@ void setupWebServer() {
   server.on("/api/file-info", handleFileInfo);
 
   // Main UI
+  // Main UI. If the SD is mounted but the dashboard files aren't installed
+  // yet, serve a self-contained fallback page (embedded literal below) that
+  // offers to upload an .espkg via the existing /api/update-package endpoint.
+  // Prior behaviour was a raw 404 that made a fresh unit look bricked even
+  // though the AP was up and the update endpoint was live.
+  static const char kSDEmptyPage[] PROGMEM = R"HTML(<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set up this device</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0a0b;--surface:#141416;--line:#2a2a30;--text:#e8e8ea;--muted:#8a8a90;--accent:#3aa7f5;--danger:#c8442d}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:640px;margin:0 auto;padding:32px 20px}
+h1{font-size:28px;margin:0 0 8px;letter-spacing:-0.01em}
+.sub{color:var(--muted);margin:0 0 28px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;margin:16px 0}
+.card h2{font-size:18px;margin:0 0 8px}
+.card p{margin:0 0 12px;color:var(--muted)}
+label.file{display:block;border:1px dashed var(--line);border-radius:10px;padding:22px;text-align:center;cursor:pointer;color:var(--muted)}
+label.file:hover{color:var(--text);border-color:var(--accent)}
+label.file input{display:none}
+button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:12px 18px;font:600 16px/1 inherit;cursor:pointer;width:100%;margin-top:12px}
+button[disabled]{opacity:.5;cursor:not-allowed}
+.log{background:#000;color:#9ac;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;border-radius:10px;padding:12px;min-height:80px;white-space:pre-wrap;margin-top:12px}
+.err{color:var(--danger)}
+.ok{color:#30d158}
+code{background:#000;padding:2px 6px;border-radius:4px;font-size:14px}
+</style></head><body><div class="wrap">
+<h1>Set up this device</h1>
+<p class="sub">The SD card is mounted but doesn&rsquo;t have the dashboard files yet. Upload the update package and this device will finish setting itself up.</p>
+<div class="card">
+<h2>1&nbsp; Get the package</h2>
+<p>Download the latest <code>.espkg</code> from
+<a href="https://github.com/QWavey/ESP-S3-Key-BadUSB/releases" style="color:var(--accent)">the ESP-S3-Key releases page</a>
+or build one with <code>python tools/build_espkg.py --web &quot;Website [ESP SD]&quot;</code>.</p>
+</div>
+<div class="card">
+<h2>2&nbsp; Upload it</h2>
+<label class="file" id="drop"><input type="file" id="pkg" accept=".espkg"><span id="dropText">Drop <code>.espkg</code> here or tap to choose a file</span></label>
+<button id="go" disabled>Upload &amp; apply</button>
+<div class="log" id="log">Idle.</div>
+</div>
+<p class="sub">This form posts to <code>/api/update-package</code> &mdash; the same endpoint the full dashboard uses. Nothing leaves this device.</p>
+</div>
+<script>
+const $ = q => document.querySelector(q);
+const log = (m, cls) => { const l = $('#log'); const s = document.createElement('div'); if (cls) s.className = cls; s.textContent = m; l.appendChild(s); l.scrollTop = l.scrollHeight; };
+$('#pkg').addEventListener('change', e => { const f = e.target.files[0]; if (f) { $('#dropText').textContent = f.name + '  (' + Math.round(f.size/1024) + ' KB)'; $('#go').disabled = false; } });
+$('#go').addEventListener('click', async () => {
+  const f = $('#pkg').files[0]; if (!f) return;
+  $('#go').disabled = true; log('Uploading ' + f.name + '…');
+  const fd = new FormData(); fd.append('package', f, f.name);
+  try {
+    const r = await fetch('/api/update-package', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    log('Applied. Reloading in a few seconds…', 'ok');
+    setTimeout(() => location.reload(), 5000);
+  } catch (e) { log('Upload failed: ' + e, 'err'); $('#go').disabled = false; }
+});
+</script></body></html>)HTML";
+
   server.on("/", []() {
     if (!sdCardPresent) { server.send(500, "text/plain", "SD Card not present"); return; }
-    if (!SD.exists(FILE_INDEX)) { server.send(404, "text/plain", "index.html not found on SD card"); return; }
+    if (!SD.exists(FILE_INDEX)) {
+      // SD is mounted but the dashboard isn't installed — show the setup
+      // fallback with an .espkg upload form instead of a raw 404.
+      server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      server.send_P(200, "text/html", kSDEmptyPage);
+      return;
+    }
     File file = SD.open(FILE_INDEX);
     if (!file) { server.send(500, "text/plain", "Failed to open index.html"); return; }
     server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
