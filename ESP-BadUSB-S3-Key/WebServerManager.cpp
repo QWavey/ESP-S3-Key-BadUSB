@@ -696,6 +696,17 @@ $('#go').addEventListener('click', async () => {
 
   server.on("/api/stats", []() {
     DynamicJsonDocument doc(4096);
+    // Hidden-settings list — the shared dashboard HTML hides any element
+    // carrying [data-setting=<key>] whose key is in this array. Key
+    // firmware hides:
+    //   lan_mode — Watch-only feature (USB Host to Ethernet adapter);
+    //              on the Key form-factor the USB PHY is committed to
+    //              device mode as HID+MSC and there's no room for a
+    //              runtime host mode swap.
+    {
+      JsonArray hidden = doc.createNestedArray("hidden_settings");
+      hidden.add("lan_mode");
+    }
     doc["errorCount"] = errorCount;
     doc["totalScripts"] = totalScriptsExecuted;
     doc["totalCommands"] = totalCommandsExecuted;
