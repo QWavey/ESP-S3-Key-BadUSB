@@ -53,6 +53,7 @@ String g_currentTopScript = "";
 String lastCommand = "";
 bool scriptRunning = false;
 bool stopRequested = false;
+volatile bool scriptPaused = false;   // set by /api/pause; cleared by /api/resume
 bool bootModeEnabled = false;
 String bootScript = "";
 std::vector<String> currentBootScriptFiles;

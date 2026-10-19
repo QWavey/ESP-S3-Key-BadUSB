@@ -21,6 +21,7 @@ void handleFileUpload() {
     if (uploadFilename.indexOf('/') >= 0 || uploadFilename.indexOf('\\') >= 0 ||
         uploadFilename.indexOf("..") >= 0 || uploadFilename.length() == 0) {
       Serial.println("[UPLOAD] Rejected unsafe filename: " + uploadFilename);
+      if (uploadFile) uploadFile.close();
       uploadFilename = "";
       return;
     }

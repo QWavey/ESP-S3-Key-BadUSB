@@ -696,6 +696,11 @@ void executeScript(const String& script) {
   std::vector<String> rowerPayloads;
 
   while (i < lines.size() && !stopRequested) {
+    // Pause point: /api/pause flips scriptPaused; loop here until
+    // /api/resume clears it or /api/stop sets stopRequested.
+    while (scriptPaused && !stopRequested) {
+        delay(50);
+    }
     currentLineNum = i + 1;
     String line = lines[i];
     line.trim();
