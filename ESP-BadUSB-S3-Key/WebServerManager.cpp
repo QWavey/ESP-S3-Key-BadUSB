@@ -967,13 +967,13 @@ $('#go').addEventListener('click', async () => {
     DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, body)) { server.send(400, "text/plain", "Invalid JSON"); return; }
 
-    // Post-setup lockdown: once setup_done=true, only the AP-password holder
-    // can rerun the wizard.
-    bool already = preferences.getBool("setup_done", false);
-    if (already) {
+    // Always require the current AP password — protects first-run hijack where
+    // an attacker who knows the default passphrase could call setup-complete
+    // before the owner does and lock them out.
+    {
       String claimed = doc["currentPassword"] | "";
       if (claimed != ap_password) {
-        server.send(403, "text/plain", "Setup already completed. Supply currentPassword to rerun.");
+        server.send(403, "text/plain", "Supply currentPassword (current AP passphrase) to run setup.");
         return;
       }
     }

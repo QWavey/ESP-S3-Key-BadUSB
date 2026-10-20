@@ -32,7 +32,7 @@ THIS README NEEDS A REWRITE
 Requires a FAT32 microSD. The firmware auto-creates `/languages`, `/scripts`,
 `/logs`, `/uploads`, `/extensions/{hak5,custom}` on first boot.
 
-Default AP: **ESP32-BadUSB** / `badusb123` → http://192.168.4.1
+Default AP: **ESP32-BadUSB** / `[see Config.h — change on first run]` → http://192.168.4.1
 
 ## Differences from the DevKitC variant
 
